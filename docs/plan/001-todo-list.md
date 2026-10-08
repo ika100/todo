@@ -3,7 +3,7 @@ plan_id: 001-todo-list
 spec: 001-todo-list
 feature: One shared todo list in the browser (todo-web), stored by todo-api in the product's Postgres
 gitops_app: ika100/todo
-status: in_progress
+status: completed
 repos:
 - id: todo-api
   shape: service-python
@@ -28,7 +28,7 @@ repos:
     Acceptance tests run against a real Postgres (testcontainers or a devbox-provided server), not SQLite.
     Replace FastAPI's default 422 body with the error format of the contract. Document DATABASE_URL in docs/env-vars.md.
   depends_on: []
-  done: false
+  done: true
 - id: todo-web
   shape: web-nextjs
   summary: Todo list page at / (show, add, toggle, delete todos) backed by todo-api
@@ -53,7 +53,7 @@ repos:
     The todo list replaces the template landing page at `/`; keep /api/health, /api/ready, /api/metrics.
     Document TODO_API_URL in docs/env-vars.md. Test against a mocked todo-api that follows the contract.
   depends_on: []
-  done: false
+  done: true
 - id: todo
   shape: gitops-app
   summary: Publish todo-web, wire it to todo-api, add the postgres addon for todo-api
@@ -66,7 +66,7 @@ repos:
     storage in dev. Do not add staging/prod to either service (promotion is a non-goal). Then `devbox run render`
     and `devbox run validate`.
   depends_on: []
-  done: false
+  done: true
 gitops_pin: []
 ---
 
