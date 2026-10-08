@@ -1,7 +1,7 @@
 ---
 spec_id: 001-todo-list
 title: Todo list
-status: approved
+status: building
 priority: P1
 shape: gitops-app
 ---
@@ -74,3 +74,4 @@ As a user, I want my todos to still be there after the product is restarted or u
 - 2026-10-08 created
 - 2026-10-08 amended: open questions answered; added AC-001.14 (todos survive a restart or redeploy of todo-api, stored in Postgres via the postgres addon) and its story; AC-001.10 clarified as immediate deletion without confirmation; Non-goals extended (todo limit, publishing todo-api, delete confirmation/undo).
 - 2026-10-08 approved
+- 2026-10-08 building

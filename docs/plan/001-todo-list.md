@@ -3,45 +3,70 @@ plan_id: 001-todo-list
 spec: 001-todo-list
 feature: One shared todo list in the browser (todo-web), stored by todo-api in the product's Postgres
 gitops_app: ika100/todo
-status: draft
+status: in_progress
 repos:
-  - id: todo-api
-    shape: service-python
-    summary: Todo REST API (list, create, mark done/not done, delete) persisted in Postgres
-    acs: [AC-001.3, AC-001.5, AC-001.6, AC-001.7, AC-001.8, AC-001.9, AC-001.10, AC-001.11, AC-001.13, AC-001.14]
-    arguments: |
-      Connection comes only from DATABASE_URL (CloudNativePG `uri`, scheme `postgresql://`), injected by the postgres
-      addon; PG* variables are also present. Add a Postgres driver (psycopg 3) through the repo's devbox/uv workflow;
-      if an ORM needs a dialect scheme (`postgresql+psycopg://`), rewrite it in code, never in gitops.
-      Create the `todos` table idempotently on startup (or with a migration run at startup); no manual DB steps.
-      `/ready` must return 503 while the database is unreachable; `/health` stays DB-independent.
-      Acceptance tests run against a real Postgres (testcontainers or a devbox-provided server), not SQLite.
-      Replace FastAPI's default 422 body with the error format of the contract. Document DATABASE_URL in docs/env-vars.md.
-    depends_on: []
-    done: false
-  - id: todo-web
-    shape: web-nextjs
-    summary: Todo list page at / (show, add, toggle, delete todos) backed by todo-api
-    acs: [AC-001.1, AC-001.2, AC-001.3, AC-001.4, AC-001.5, AC-001.6, AC-001.7, AC-001.8, AC-001.9, AC-001.10, AC-001.11, AC-001.12, AC-001.13]
-    arguments: |
-      todo-api is not published: the browser never calls it. All calls go server-side (Server Components for the
-      initial list, Server Actions or app/api route handlers for mutations) to TODO_API_URL (server-only env var,
-      never NEXT_PUBLIC_*; deployed value http://todo-api). Every call to todo-api uses a 5 s timeout.
-      The todo list replaces the template landing page at `/`; keep /api/health, /api/ready, /api/metrics.
-      Document TODO_API_URL in docs/env-vars.md. Test against a mocked todo-api that follows the contract.
-    depends_on: []
-    done: false
-  - id: todo
-    shape: gitops-app
-    summary: Publish todo-web, wire it to todo-api, add the postgres addon for todo-api
-    acs: [AC-001.1, AC-001.14]
-    arguments: |
-      In services.yaml: todo-web gets `expose: {host: todo-web}` and `env: {TODO_API_URL: http://todo-api}` (keep
-      NODE_ENV); todo-api gets `uses: [postgres]`. `/gitops:addon add postgres` with version 17, 1 instance and 1Gi
-      storage in dev. Do not add staging/prod to either service (promotion is a non-goal). Then `devbox run render`
-      and `devbox run validate`.
-    depends_on: []
-    done: false
+- id: todo-api
+  shape: service-python
+  summary: Todo REST API (list, create, mark done/not done, delete) persisted in Postgres
+  acs:
+  - AC-001.3
+  - AC-001.5
+  - AC-001.6
+  - AC-001.7
+  - AC-001.8
+  - AC-001.9
+  - AC-001.10
+  - AC-001.11
+  - AC-001.13
+  - AC-001.14
+  arguments: |
+    Connection comes only from DATABASE_URL (CloudNativePG `uri`, scheme `postgresql://`), injected by the postgres
+    addon; PG* variables are also present. Add a Postgres driver (psycopg 3) through the repo's devbox/uv workflow;
+    if an ORM needs a dialect scheme (`postgresql+psycopg://`), rewrite it in code, never in gitops.
+    Create the `todos` table idempotently on startup (or with a migration run at startup); no manual DB steps.
+    `/ready` must return 503 while the database is unreachable; `/health` stays DB-independent.
+    Acceptance tests run against a real Postgres (testcontainers or a devbox-provided server), not SQLite.
+    Replace FastAPI's default 422 body with the error format of the contract. Document DATABASE_URL in docs/env-vars.md.
+  depends_on: []
+  done: false
+- id: todo-web
+  shape: web-nextjs
+  summary: Todo list page at / (show, add, toggle, delete todos) backed by todo-api
+  acs:
+  - AC-001.1
+  - AC-001.2
+  - AC-001.3
+  - AC-001.4
+  - AC-001.5
+  - AC-001.6
+  - AC-001.7
+  - AC-001.8
+  - AC-001.9
+  - AC-001.10
+  - AC-001.11
+  - AC-001.12
+  - AC-001.13
+  arguments: |
+    todo-api is not published: the browser never calls it. All calls go server-side (Server Components for the
+    initial list, Server Actions or app/api route handlers for mutations) to TODO_API_URL (server-only env var,
+    never NEXT_PUBLIC_*; deployed value http://todo-api). Every call to todo-api uses a 5 s timeout.
+    The todo list replaces the template landing page at `/`; keep /api/health, /api/ready, /api/metrics.
+    Document TODO_API_URL in docs/env-vars.md. Test against a mocked todo-api that follows the contract.
+  depends_on: []
+  done: false
+- id: todo
+  shape: gitops-app
+  summary: Publish todo-web, wire it to todo-api, add the postgres addon for todo-api
+  acs:
+  - AC-001.1
+  - AC-001.14
+  arguments: |
+    In services.yaml: todo-web gets `expose: {host: todo-web}` and `env: {TODO_API_URL: http://todo-api}` (keep
+    NODE_ENV); todo-api gets `uses: [postgres]`. `/gitops:addon add postgres` with version 17, 1 instance and 1Gi
+    storage in dev. Do not add staging/prod to either service (promotion is a non-goal). Then `devbox run render`
+    and `devbox run validate`.
+  depends_on: []
+  done: false
 gitops_pin: []
 ---
 
