@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: todo-web
+  labels: &id001
+    app: todo-web
+    app.kubernetes.io/name: todo-web
+    app.kubernetes.io/part-of: todo
+    app.kubernetes.io/managed-by: gitops-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: todo-web
+  template:
+    metadata:
+      labels: *id001
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: app
+        image: ghcr.io/ika100/todo-web
+        ports:
+        - name: http
+          containerPort: 3000
+        env:
+        - name: NODE_ENV
+          value: production
+        - name: PORT
+          value: '3000'
+        resources:
+          requests:
+            cpu: 100m
+            memory: 192Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        startupProbe:
+          httpGet:
+            path: /api/health
+            port: http
+          periodSeconds: 3
+          failureThreshold: 40
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: http
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /api/ready
+            port: http
+          periodSeconds: 5
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+          runAsUser: 1000
+        volumeMounts:
+        - name: next-cache
+          mountPath: /app/.next/cache
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: next-cache
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
