@@ -37,3 +37,12 @@ hosts:
   dev: "{service}.{app}-dev.localhost"
   # staging: "{service}.staging.example.com"
   # prod: "{service}.example.com"
+addons:
+  postgres:
+    version: 17
+    instances:
+      dev: 1
+      prod: 3
+    storage:
+      dev: 1Gi
+      prod: 20Gi
