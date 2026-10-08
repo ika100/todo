@@ -18,10 +18,13 @@ if [ -n "${SPEC_CHECK_PLATFORM:-}" ]; then  # a local platform checkout (platfor
 else
   case "$ref" in v[0-9]*) [ -f "$dir/scripts/cplat/cplat.py" ] || fetch "$ref" ;; *) fetch "$ref" ;; esac
 fi
-if [ ! -f "$dir/scripts/cplat/spec.py" ]; then
+if [ ! -f "$dir/scripts/cplat/spec.py" ] && [ -z "${SPEC_CHECK_PLATFORM:-}" ] && [ "$ref" != main ]; then
   echo "spec-check: platform $ref predates spec checks (ADR-026); using main"
   ref=main; dir="${XDG_CACHE_HOME:-$HOME/.cache}/sdlc-foundry-spec-check/main"; fetch main
-  [ -f "$dir/scripts/cplat/spec.py" ] || { echo "spec-check: the platform has no spec checks yet; skipped"; exit 0; }
+fi
+if [ ! -f "$dir/scripts/cplat/spec.py" ]; then
+  echo "spec-check: the platform has no spec checks yet; skipped"
+  exit 0
 fi
 if [ "${SPEC_CHECK_STRICT:-}" = "1" ]; then
   exec uv run --quiet "$dir/scripts/cplat/cplat.py" spec ci --strict
