@@ -26,6 +26,9 @@ As a user, I want to mark a todo as done, or back to not done, so that the list 
 As a user, I want to delete a todo, so that the list only holds what still matters to me.
 **Repos:** todo-web, todo-api
 
+As a user, I want my todos to still be there after the product is restarted or updated, so that I can rely on the list.
+**Repos:** todo-api, todo (postgres addon for the product's database and its wiring to todo-api)
+
 ## Acceptance criteria
 
 - **AC-001.1** Given the product is running in the `dev` environment, when a user opens `http://todo-web.todo-dev.localhost:8088/` on the local cluster, then the todo list page loads.
@@ -37,10 +40,11 @@ As a user, I want to delete a todo, so that the list only holds what still matte
 - **AC-001.7** Given a title with leading or trailing spaces, when the user adds it, then the todo is stored and shown with those spaces removed.
 - **AC-001.8** Given a todo that is not done, when the user marks it as done, then it is shown as done, and it is still shown as done after the page is reloaded.
 - **AC-001.9** Given a todo that is done, when the user marks it as not done, then it is shown as not done, and it is still shown as not done after the page is reloaded.
-- **AC-001.10** Given a todo in the list, when the user deletes it, then it disappears from the list and does not reappear after the page is reloaded.
+- **AC-001.10** Given a todo in the list, when the user deletes it, then it disappears from the list immediately, without a confirmation step, and does not reappear after the page is reloaded.
 - **AC-001.11** Given a todo that was deleted in another browser tab, when the user marks it as done or deletes it in the current tab, then the page shows "This todo no longer exists" and the list is refreshed from todo-api.
 - **AC-001.12** Given todo-api is unreachable, when the user opens the page or adds, changes or deletes a todo, then the page shows "Todos are unavailable, please try again" within 10 seconds and does not show the change as saved.
 - **AC-001.13** Given todos were added in one browser, when the same page is opened in a different browser, then the same list is shown (one shared list, no sign-in).
+- **AC-001.14** Given todos exist, some done and some not done, when todo-api is restarted or redeployed in the `dev` environment, then after it is available again the todo list page shows the same todos with the same titles, done states and order; the todos are kept in the product's Postgres database provided by the postgres addon.
 
 ## Non-goals
 
@@ -50,18 +54,22 @@ As a user, I want to delete a todo, so that the list only holds what still matte
 - Several lists.
 - Promotion to `staging` and `prod` (handled later with `/gitops:promote`).
 - Offline use without todo-api.
+- A limit on the number of todos.
+- Publishing todo-api outside the cluster; only todo-web is published and reaches it.
+- A confirmation step or "Undo" when deleting a todo.
 
 ## Open questions
 
-- Must todos survive a restart or redeploy of todo-api? (suggested: yes, stored in the product's Postgres database, which adds the postgres addon for todo-api; alternatives: no, in-memory is fine for a first version; affects a new criterion and the product's addons)
-- Confirm: one shared list for everyone who can reach the URL, with no sign-in. (suggested: yes; alternatives: sign-in with a list per user, which would be a separate spec; affects AC-001.13 and Non-goals)
-- Confirm: the maximum title length is 200 characters. (suggested: 200; alternatives: 100, 500; affects AC-001.6)
-- Confirm: the list is ordered oldest first. (suggested: oldest first; alternatives: newest first, or not-done todos before done ones; affects AC-001.3)
-- Should deleting a todo ask for confirmation first? (suggested: no, delete immediately; alternatives: a confirmation dialog, or an "Undo" for 5 seconds; affects AC-001.10)
-- Confirm: the user-visible texts "No todos yet", "Title is required", "Title must be at most 200 characters", "This todo no longer exists" and "Todos are unavailable, please try again", in English. (suggested: yes; alternative: give other wording or language; affects AC-001.2, AC-001.5, AC-001.6, AC-001.11, AC-001.12)
-- Confirm: todo-web is published at the default dev hostname `todo-web.todo-dev.localhost`, and todo-api is not published (only todo-web reaches it). (suggested: yes; alternatives: a different hostname, or also publish todo-api; affects AC-001.1)
-- Is there a maximum number of todos? (suggested: no limit for now; alternative: 500 todos, after which adding is refused with a message; affects a new criterion)
+- ~~Must todos survive a restart or redeploy of todo-api?~~ Answered: yes, stored in the product's Postgres via the postgres addon, see AC-001.14.
+- ~~Confirm: one shared list, no sign-in.~~ Answered: yes, see AC-001.13 and Non-goals.
+- ~~Confirm: the maximum title length is 200 characters.~~ Answered: 200, see AC-001.6.
+- ~~Confirm: the list is ordered oldest first.~~ Answered: oldest first, see AC-001.3.
+- ~~Should deleting a todo ask for confirmation first?~~ Answered: no, delete immediately, see AC-001.10 and Non-goals.
+- ~~Confirm: the user-visible texts, in English.~~ Answered: yes, as written, see AC-001.2, AC-001.5, AC-001.6, AC-001.11, AC-001.12.
+- ~~Confirm: todo-web published at `todo-web.todo-dev.localhost`, todo-api not published.~~ Answered: yes, see AC-001.1 and Non-goals.
+- ~~Is there a maximum number of todos?~~ Answered: no limit for now, see Non-goals.
 
 ## Changelog
 
 - 2026-10-08 created
+- 2026-10-08 amended: open questions answered; added AC-001.14 (todos survive a restart or redeploy of todo-api, stored in Postgres via the postgres addon) and its story; AC-001.10 clarified as immediate deletion without confirmation; Non-goals extended (todo limit, publishing todo-api, delete confirmation/undo).
