@@ -3,7 +3,7 @@ plan_id: 002-update-a-notice
 spec: 002-update-a-notice
 feature: Edit a todo's title in place in the list (todo-web), persisted by todo-api through PATCH /todos/{id}
 gitops_app: ika100/todo
-status: draft
+status: in_progress
 repos:
 - id: todo-api
   shape: service-python
