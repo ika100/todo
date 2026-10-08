@@ -31,6 +31,8 @@ spec:
           value: production
         - name: PORT
           value: '3000'
+        - name: TODO_API_URL
+          value: http://todo-api
         resources:
           requests:
             cpu: 100m

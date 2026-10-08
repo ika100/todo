@@ -31,6 +31,36 @@ spec:
           value: INFO
         - name: PORT
           value: '8080'
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: todo-postgres-app
+              key: uri
+        - name: PGHOST
+          valueFrom:
+            secretKeyRef:
+              name: todo-postgres-app
+              key: host
+        - name: PGPORT
+          valueFrom:
+            secretKeyRef:
+              name: todo-postgres-app
+              key: port
+        - name: PGDATABASE
+          valueFrom:
+            secretKeyRef:
+              name: todo-postgres-app
+              key: dbname
+        - name: PGUSER
+          valueFrom:
+            secretKeyRef:
+              name: todo-postgres-app
+              key: user
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: todo-postgres-app
+              key: password
         resources:
           requests:
             cpu: 50m

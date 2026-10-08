@@ -19,6 +19,8 @@ services:
       tmp: /tmp
     env:
       LOG_LEVEL: INFO
+    uses:
+      - postgres
     secretRefs: []
     replicas: 1
     resources:
@@ -45,6 +47,7 @@ services:
       next-cache: /app/.next/cache
     env:
       NODE_ENV: production
+      TODO_API_URL: http://todo-api
     secretRefs: []
     replicas: 1
     resources:
@@ -54,6 +57,8 @@ services:
       limits:
         cpu: 1000m
         memory: 512Mi
+    expose:
+      host: todo-web
     environments:
       - dev
 #  - name: my-api

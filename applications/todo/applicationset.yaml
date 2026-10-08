@@ -83,3 +83,32 @@ spec:
           selfHeal: true
         syncOptions:
         - CreateNamespace=true
+---
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: todo-addons-dev
+  namespace: argocd
+spec:
+  generators:
+  - list:
+      elements:
+      - name: postgres
+  template:
+    metadata:
+      name: addon-{{name}}-dev
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/ika100/todo
+        targetRevision: main
+        path: applications/todo/addons/dev/{{name}}
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: todo-dev
+      syncPolicy:
+        automated:
+          prune: false
+          selfHeal: true
+        syncOptions:
+        - CreateNamespace=true
