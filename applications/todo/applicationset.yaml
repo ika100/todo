@@ -6,7 +6,9 @@ metadata:
 spec:
   generators:
   - list:
-      elements: []
+      elements:
+      - name: todo-api
+      - name: todo-web
   template:
     metadata:
       name: '{{name}}-dev'

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: todo-api
+  labels:
+    app: todo-api
+    app.kubernetes.io/name: todo-api
+    app.kubernetes.io/part-of: todo
+    app.kubernetes.io/managed-by: gitops-app
+spec:
+  type: ClusterIP
+  selector:
+    app: todo-api
+  ports:
+  - name: http
+    port: 80
+    targetPort: http

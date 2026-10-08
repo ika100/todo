@@ -4,7 +4,58 @@
 # `deployable-service` GitHub topic. This repo owns ALL manifests: services only ship an image.
 #
 # A service is rendered only for the environments in `environments` (new services start in dev; `/gitops:promote` adds the next).
-services: []
+services:
+  - name: todo-api
+    repo: ika100/todo-api
+    shape: service-python
+    image: ghcr.io/ika100/todo-api
+    port: 8080
+    probes:
+      liveness: /health
+      readiness: /ready
+    user: 10001
+    metrics: /metrics
+    volumes:
+      tmp: /tmp
+    env:
+      LOG_LEVEL: INFO
+    secretRefs: []
+    replicas: 1
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    environments:
+      - dev
+  - name: todo-web
+    repo: ika100/todo-web
+    shape: web-nextjs
+    image: ghcr.io/ika100/todo-web
+    port: 3000
+    probes:
+      liveness: /api/health
+      readiness: /api/ready
+    user: 1000
+    metrics: /api/metrics
+    volumes:
+      tmp: /tmp
+      next-cache: /app/.next/cache
+    env:
+      NODE_ENV: production
+    secretRefs: []
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 192Mi
+      limits:
+        cpu: 1000m
+        memory: 512Mi
+    environments:
+      - dev
 #  - name: my-api
 #    repo: ika100/my-api             # where the image is built
 #    shape: service-python
