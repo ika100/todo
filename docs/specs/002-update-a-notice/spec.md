@@ -1,7 +1,7 @@
 ---
 spec_id: 002-update-a-notice
 title: Edit a todo's title
-status: draft
+status: approved
 priority: P1
 shape: gitops-app
 ---
@@ -55,3 +55,4 @@ none
 
 - 2026-10-08 created
 - 2026-10-08 amended: answers to open questions; renamed to Edit a todo's title
+- 2026-10-08 approved
