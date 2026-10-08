@@ -60,6 +60,15 @@ repos:
   acs:
   - AC-001.1
   - AC-001.14
+  gitops:
+  - addon: postgres
+  - uses: postgres
+    service: todo-api
+  - expose: todo-web
+    host: todo-web
+  - env:
+      TODO_API_URL: http://todo-api
+    service: todo-web
   arguments: |
     In services.yaml: todo-web gets `expose: {host: todo-web}` and `env: {TODO_API_URL: http://todo-api}` (keep
     NODE_ENV); todo-api gets `uses: [postgres]`. `/gitops:addon add postgres` with version 17, 1 instance and 1Gi
@@ -167,7 +176,7 @@ Base URL inside the environment: `http://todo-api` (env `TODO_API_URL` on todo-w
 - `204` — deleted, empty body.
 - `404` `todo_not_found` — no todo with this id (including ids that are not valid UUIDs, and ids already deleted).
 
-### Error format
+### Errors
 
 Every 4xx/5xx response produced by todo-api has this body (FastAPI's default validation body is replaced):
 
@@ -185,6 +194,10 @@ Every 4xx/5xx response produced by todo-api has this body (FastAPI's default val
 
 todo-web branches on `code` and status, never on `message`. todo-web treats any 5xx, a connection error, or no
 response within 5 seconds as "unavailable".
+
+### Timeouts
+
+todo-web treats a todo-api call that has not answered within 5 seconds as "unavailable"; todo-api answers `503 unavailable` when its database is unreachable (see Errors).
 
 ### Probes
 

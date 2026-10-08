@@ -9,7 +9,7 @@
 #
 # Environment:
 #   LOCAL_CLUSTER        cluster name (default <app>-local)
-#   LOCAL_HTTP_PORT      host port of the Gateway (default 8088; `auto` = the first free port from 8088; a busy port is reported
+#   LOCAL_HTTP_PORT      host port of the Gateway (unset: 8088, or the next free port when 8088 is busy; `auto`: the first free port; an explicit busy port is reported
 #                        with its owner before anything is created)
 #   ARGOCD_VERSION       default stable
 #   K3S_IMAGE            default rancher/k3s:v1.32.5-k3s1 — the version the Gateway setup below is verified against
@@ -41,7 +41,8 @@ cd "$here/.."
 app=$(basename "$(find applications -mindepth 1 -maxdepth 1 -type d | sort | head -1)")
 name="${LOCAL_CLUSTER:-$app-local}"
 ctx="k3d-$name"
-port="${LOCAL_HTTP_PORT:-8088}"
+port="${LOCAL_HTTP_PORT:-default}"
+base_port="${LOCAL_HTTP_PORT_BASE:-8088}"   # the preferred port when LOCAL_HTTP_PORT is unset
 argocd_version="${ARGOCD_VERSION:-stable}"
 k3s_image="${K3S_IMAGE:-rancher/k3s:v1.32.5-k3s1}"
 gateway_api_version="${GATEWAY_API_VERSION:-v1.2.1}"
@@ -75,8 +76,11 @@ case "${1:-up}" in
     ;;
   up)
     if ! k3d cluster list "$name" >/dev/null 2>&1; then    # a new cluster binds the host ports: check them first
-      if [ "$port" = auto ]; then
-        port=$(free_port 8088) || { echo "ERROR: no free host port between 8088 and 8138." >&2; exit 1; }
+      if [ "$port" = default ]; then   # spec 056: no LOCAL_HTTP_PORT → the preferred port, or the next free one
+        port=$(free_port "$base_port") || { echo "ERROR: no free host port between $base_port and $((base_port + 50))." >&2; exit 1; }
+        [ "$port" != "$base_port" ] && echo "Host port: port $base_port is busy ($(port_owner "$base_port" | grep . || echo 'another program')); using $port"
+      elif [ "$port" = auto ]; then
+        port=$(free_port "$base_port") || { echo "ERROR: no free host port between $base_port and $((base_port + 50))." >&2; exit 1; }
         echo "Host port: using free port $port (LOCAL_HTTP_PORT=auto)"
       fi
       if port_in_use "$port"; then

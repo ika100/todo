@@ -1,4 +1,4 @@
 # Written by /shared:new-service and /shared:update-service; read by /shared:doctor.
-platform: 3.2.0
+platform: 4.0.0
 shape: gitops-app
-ref: main
+ref: v4.0.0
