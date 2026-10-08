@@ -1,0 +1,83 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: todo-dev
+  namespace: argocd
+spec:
+  generators:
+  - list:
+      elements: []
+  template:
+    metadata:
+      name: '{{name}}-dev'
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/ika100/todo
+        targetRevision: main
+        path: applications/todo/overlays/dev/{{name}}
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: todo-dev
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+        - CreateNamespace=true
+---
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: todo-staging
+  namespace: argocd
+spec:
+  generators:
+  - list:
+      elements: []
+  template:
+    metadata:
+      name: '{{name}}-staging'
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/ika100/todo
+        targetRevision: main
+        path: applications/todo/overlays/staging/{{name}}
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: todo-staging
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+        - CreateNamespace=true
+---
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: todo-prod
+  namespace: argocd
+spec:
+  generators:
+  - list:
+      elements: []
+  template:
+    metadata:
+      name: '{{name}}-prod'
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/ika100/todo
+        targetRevision: main
+        path: applications/todo/overlays/prod/{{name}}
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: todo-prod
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+        - CreateNamespace=true

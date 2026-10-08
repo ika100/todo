@@ -1,0 +1,38 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.16.0/.schema/devbox.schema.json",
+  "packages": [
+    "uv@latest",
+    "kustomize@latest",
+    "kubeconform@latest",
+    "kyverno@1.19.0",
+    "k3d@latest",
+    "detect-secrets@latest",
+    "jq@latest",
+    "git@latest",
+    "gh@latest",
+    "kubectl@latest",
+    "k9s@latest"
+  ],
+  "shell": {
+    "scripts": {
+      "render": "uv run scripts/render.py",
+      "bootstrap": "[ -n \"$KUBE_CONTEXT\" ] || { echo 'Set KUBE_CONTEXT to the cluster to bootstrap, e.g. KUBE_CONTEXT=my-cluster devbox run bootstrap. Contexts:'; kubectl config get-contexts -o name; exit 1; }; echo \"Applying bootstrap/ to context $KUBE_CONTEXT\"; kubectl --context \"$KUBE_CONTEXT\" apply -n argocd -f bootstrap/",
+      "cluster-up": "bash scripts/local-cluster.sh up",
+      "cluster-down": "bash scripts/local-cluster.sh down",
+      "cluster-ui": "bash scripts/local-cluster.sh ui",
+      "render-check": "uv run scripts/render.py --check",
+      "plan-check": "uv run scripts/plan.py validate",
+      "policy-check": "bash scripts/check-policies.sh",
+      "validate": "uv run scripts/render.py --check && uv run scripts/plan.py validate && uv run scripts/check-k8s-labels.py . && for d in applications/*/overlays/*/*/ applications/*/addons/*/*/; do [ -f \"$d/kustomization.yaml\" ] || continue; echo \"kustomize build $d\"; kustomize build \"$d\" > /dev/null || exit 1; done; for f in applications/*/applicationset.yaml bootstrap/*.yaml applications/*/overlays/*/*/[dsehp]*.yaml applications/*/addons/*/*/[cs]*.yaml; do [ -f \"$f\" ] || continue; kubeconform -strict -ignore-missing-schemas -schema-location default -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' -summary \"$f\" || exit 1; done && bash scripts/check-policies.sh",
+      "lint": "devbox run validate",
+      "lint-fix": "devbox run render",
+      "quality": "devbox run validate",
+      "test": "devbox run validate",
+      "test-fast": "uv run scripts/render.py --check && uv run scripts/plan.py validate",
+      "spec-check": "bash scripts/spec-check.sh",
+      "secrets-scan": "git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline.json",
+      "security": "devbox run secrets-scan",
+      "deploy-check": "devbox run validate"
+    }
+  }
+}

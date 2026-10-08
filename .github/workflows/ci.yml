@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+    branches: [main, 'feature/**', 'fix/**', 'chore/**', 'docs/**', 'promote/**', 'compose/**']
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]   # edited: a corrected PR title is checked again
+  workflow_dispatch:
+
+# Least privilege by default; jobs that publish packages declare what they need.
+permissions:
+  contents: read
+
+# A newer push to the same pull request cancels the older run (main and tags always run to completion).
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}${{ github.event.action == 'edited' && '-edited' || '' }}   # a title edit never cancels a running build
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  quality:
+    name: quality (render-check + kustomize build + kubeconform + labels)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: jetify-com/devbox-install-action@8c6a66ed6273138b1915457069de78cb52fe3bd7 # v0.15.0
+        with:
+          enable-cache: true
+      - run: devbox run quality
+
+  security:
+    name: security (detect-secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: jetify-com/devbox-install-action@8c6a66ed6273138b1915457069de78cb52fe3bd7 # v0.15.0
+        with:
+          enable-cache: true
+      - run: devbox run security
+
+  pr-title:
+    name: pr-title (conventional commits)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Validate PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\(.+\))?!?: .{1,72}$'
+          if ! echo "$PR_TITLE" | grep -qE "$pattern"; then
+            echo "ERROR: PR title does not follow Conventional Commits."
+            echo "  Got: $PR_TITLE"
+            exit 1
+          fi
+          echo "OK: PR title is valid."

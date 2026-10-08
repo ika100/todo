@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "extraKnownMarketplaces": {
+    "sdlc-foundry": {
+      "source": {
+        "source": "github",
+        "repo": "ika100/sdlc-foundry",
+        "ref": "main"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "gitops@sdlc-foundry": true,
+    "app@sdlc-foundry": true,
+    "svc@sdlc-foundry": true,
+    "shared@sdlc-foundry": true
+  },
+  "permissions": {
+    "defaultMode": "default",
+    "allow": [
+      "Bash(devbox run *)",
+      "Bash(devbox install)",
+      "Bash(devbox shell)",
+      "Bash(git status *)",
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(git diff)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(git branch)",
+      "Bash(git rev-parse *)",
+      "Bash(git ls-files *)",
+      "Bash(git add *)",
+      "Bash(git commit -m *)",
+      "Bash(git checkout -b *)",
+      "Bash(git checkout main)",
+      "Bash(git fetch *)",
+      "Bash(git merge --ff-only *)",
+      "Bash(git push -u origin promote/*)",
+      "Bash(git push -u origin compose/*)",
+      "Bash(git push -u origin feature/*)",
+      "Bash(git push -u origin chore/*)",
+      "Bash(git push -u origin docs/*)",
+      "Bash(gh pr view *)",
+      "Bash(gh pr list *)",
+      "Bash(gh repo view *)",
+      "Bash(gh api repos/*)",
+      "Bash(gh repo clone *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(grep *)",
+      "Bash(jq *)"
+    ],
+    "ask": [
+      "Bash(git push --force *)",
+      "Bash(git push origin main)",
+      "Bash(git reset *)",
+      "Bash(git clean *)",
+      "Bash(git rebase *)",
+      "Bash(gh pr create *)",
+      "Bash(gh pr merge *)",
+      "Bash(kubectl *)"
+    ]
+  }
+}

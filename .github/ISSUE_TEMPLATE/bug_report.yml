@@ -1,0 +1,26 @@
+name: Bug report
+description: Something does not work as expected
+labels: [triage]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got.
+    validations: {required: true}
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. ...\n2. ..."
+    validations: {required: true}
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+  - type: textarea
+    id: output
+    attributes:
+      label: Error output or logs
+      description: Remove secrets and personal data first.
+      render: shell

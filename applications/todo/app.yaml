@@ -1,0 +1,39 @@
+# Per-application settings for the todo product (read by scripts/render.py).
+#
+# gateway: the Gateway API gateway that exposed services attach to. `devbox run cluster-up` installs Traefik's gateway
+#          (traefik-gateway in kube-system). Real clusters: point this at your gateway.
+# hosts:   hostname template per environment for services with `expose:`. No entry = not exposed in that environment.
+#          Placeholders: {service} (expose.host or the service name), {app}, {env}.
+#          *.localhost resolves to 127.0.0.1 in browsers and curl without any DNS or /etc/hosts setup.
+# secretStore: the (Cluster)SecretStore that `remote` secrets in services.yaml are read from (External Secrets Operator, ADR-018).
+#          `cluster-up` creates `platform-secrets` (reads Secrets from the secrets-store namespace). Real clusters: point this
+#          at your Vault / AWS / GCP store. `generate` secrets need no store: ESO generates random values in the cluster.
+secretStore:
+  name: platform-secrets
+  kind: ClusterSecretStore
+# policies: Kyverno guard rails per environment (ADR-022): non-root numeric user, read-only filesystem, no privilege escalation,
+#          dropped capabilities, no privileged/host access, resource requests + memory limit, part-of label, allowed image
+#          registries (taken from your services' images; add more under `registries`), and no `:latest` outside dev.
+#          Opt in by uncommenting; needs Kyverno in the cluster (`cluster-up` installs it locally). Mode per environment:
+#          Audit (report only), Enforce (deny) or Off; defaults Audit in dev/staging, Enforce in prod.
+#          `devbox run validate` also checks the rendered manifests offline, so a violating change fails its pull request.
+# policies:
+#   mode: {dev: Audit, staging: Audit, prod: Enforce}
+#   registries: []
+# addons:  backing services, one per application and environment (ADR-020). Declare with `/gitops:addon add postgres`, then
+#          list it under `uses:` of the services that need it: they get DATABASE_URL and PG* from the operator's Secret.
+#          Values may be per environment: {dev: 1, prod: 3}. Needs the CloudNativePG operator (`cluster-up` installs it locally).
+#          observability = an OpenTelemetry collector per environment (ADR-021): every service gets OTEL_* variables, the
+#          collector receives OTLP and scrapes each service's Prometheus `metrics:` path. Optional backends: `ui: lgtm` (local
+#          Grafana/Tempo/Loki/Prometheus dev stack that `cluster-up` installs, http://grafana.localhost:8088 (or the port cluster-up prints)) or
+#          `exportTo: https://your-otlp-http-endpoint` (+ `headersSecret: <Secret with key AUTHORIZATION>`).
+# addons:
+#   postgres: {version: 17, instances: {dev: 1, prod: 3}, storage: {dev: 1Gi, prod: 20Gi}}
+#   observability: {ui: lgtm}
+gateway:
+  name: traefik-gateway
+  namespace: kube-system
+hosts:
+  dev: "{service}.{app}-dev.localhost"
+  # staging: "{service}.staging.example.com"
+  # prod: "{service}.example.com"

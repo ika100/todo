@@ -1,0 +1,21 @@
+# Registry of the services that make up the todo application (ADR-014, ADR-017).
+# Edit with `/gitops:compose add|remove <service>` and `/gitops:promote`; then `devbox run render` regenerates the
+# ApplicationSets and every Kubernetes manifest under overlays/. Every repo listed here must carry the
+# `deployable-service` GitHub topic. This repo owns ALL manifests: services only ship an image.
+#
+# A service is rendered only for the environments in `environments` (new services start in dev; `/gitops:promote` adds the next).
+services: []
+#  - name: my-api
+#    repo: ika100/my-api             # where the image is built
+#    shape: service-python
+#    image: ghcr.io/ika100/my-api       # the tag is pinned per environment in overlays/<env>/<service>/kustomization.yaml
+#    port: 8080
+#    probes: {liveness: /health, readiness: /ready}
+#    user: 10001                               # numeric non-root UID of the image
+#    volumes: {tmp: /tmp}                      # writable emptyDir mounts (root filesystem is read-only)
+#    env: {LOG_LEVEL: INFO}                    # non-secret wiring, e.g. API_URL: http://other-service
+#    secretRefs: []                            # names of existing Secrets exposed as env vars
+#    replicas: {dev: 1, staging: 1, prod: 2}   # or a single number
+#    resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {cpu: 500m, memory: 512Mi}}
+#    expose: {host: my-api}                    # optional: publish through the Gateway (see app.yaml)
+#    environments: [dev]
