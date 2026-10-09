@@ -40,7 +40,7 @@ Argo must be able to read this repo. Then, once per cluster, a human runs `KUBE_
 
 ## Pin policy
 
-- `dev`: `latest` by default. Optionally pin to the newest build automatically (see `.github/workflows/bump-dev.yml` if present).
+- `dev`: follows `main`. Each merge to a service's main opens a `pin/dev-<service>-<sha7>` PR here (`.github/workflows/pin-dev.yml`, ADR-027) that merges itself after CI; a red CI leaves it open and dev on the old image. Until a service's first pin its dev overlay uses the `latest` tag. Pin by hand: `devbox run pin -- dev <service> sha-<7>`.
 - `staging`: image tag `sha-<7>` of a main build, set by `/gitops:promote`.
 - `prod`: release image tag `X.Y.Z` (the git tag `vX.Y.Z` without the `v`), set by `/gitops:promote`.
 

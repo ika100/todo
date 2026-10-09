@@ -22,6 +22,7 @@
       "cluster-ui": "bash scripts/local-cluster.sh ui",
       "render-check": "uv run scripts/render.py --check",
       "plan-check": "uv run scripts/plan.py validate",
+      "pin": "uv run scripts/pin.py",
       "policy-check": "bash scripts/check-policies.sh",
       "validate": "uv run scripts/render.py --check && uv run scripts/plan.py validate && uv run scripts/check-k8s-labels.py . && for d in applications/*/overlays/*/*/ applications/*/addons/*/*/; do [ -f \"$d/kustomization.yaml\" ] || continue; echo \"kustomize build $d\"; kustomize build \"$d\" > /dev/null || exit 1; done; for f in applications/*/applicationset.yaml bootstrap/*.yaml applications/*/overlays/*/*/[dsehp]*.yaml applications/*/addons/*/*/[cs]*.yaml; do [ -f \"$f\" ] || continue; kubeconform -strict -ignore-missing-schemas -schema-location default -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' -summary \"$f\" || exit 1; done && bash scripts/check-policies.sh",
       "lint": "devbox run validate",

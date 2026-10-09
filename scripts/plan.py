@@ -147,30 +147,42 @@ def check_contract(meta: dict, body: str) -> list[str]:
     design = SPEC_DIR / str(meta["spec"]) / "design.md"
     contract = section(body, "Contract") or (section(design.read_text(), "Contract") if design.is_file() else None)
     if contract is None:
-        return ["a plan with two or more repos needs a `## Contract` section (in the plan or the spec's design.md) with `### Errors` and `### Timeouts`"]
-    return [f"the contract has no `### {h}` section (spec 053: say it once here instead of in every repo)"
-            for h in ("Errors", "Timeouts") if not re.search(rf"^### +{h}\b", contract, re.M)]
+        return ["a plan with two or more repos needs a contract: add `## Contract` with the headings `### Errors` and `### Timeouts` "
+                "(in the plan or the spec's design.md; spec 053)"]
+    return [f"the contract has no `### {h}` section: add a line `### {h}` under `## Contract` with {what} (spec 053: say it once "
+            "here instead of in every repo)"
+            for h, what in (("Errors", "the error format"), ("Timeouts", "the timeout per call"))
+            if not re.search(rf"^### +{h}\b", contract, re.M)]
+
+
+FINISHED = {"completed", "abandoned"}
 
 
 def check(path: Path) -> list[str]:
+    return check_all(path)[0]
+
+
+def check_all(path: Path) -> tuple[list[str], list[str]]:
+    """(errors, warnings). Spec 061: the rules of specs 045 and 053 are warnings for finished plans, written before them."""
     errs: list[str] = []
+    late: list[str] = []   # spec 045/053 findings
     try:
         meta, body = load(path)
     except Exception as e:  # noqa: BLE001
-        return [str(e)]
+        return [str(e)], []
     shapes = SHAPES | set(filter(None, __import__("os").environ.get("PLAN_SHAPES", "").split(",")))
     for k in ("plan_id", "feature", "gitops_app", "status", "repos"):
         if k not in meta:
             errs.append(f"missing key '{k}'")
     if errs:
-        return errs
+        return errs, []
     if meta["plan_id"] != path.stem:
         errs.append(f"plan_id '{meta['plan_id']}' must equal the file name '{path.stem}'")
     if meta["status"] not in STATUSES:
         errs.append(f"status must be one of {sorted(STATUSES)}")
     repos = meta["repos"]
     if not isinstance(repos, list) or not repos:
-        return errs + ["repos must be a non-empty list"]
+        return errs + ["repos must be a non-empty list"], []
     ids = [r.get("id") for r in repos]
     if len(ids) != len(set(ids)):
         errs.append("duplicate repo ids")
@@ -187,7 +199,7 @@ def check(path: Path) -> list[str]:
         if not isinstance(r.get("done"), bool):
             errs.append(f"repo {rid}: done must be true/false")
         if r.get("shape") == "gitops-app":
-            errs += check_gitops(rid, r.get("gitops"), known_services() | set(ids))
+            late += check_gitops(rid, r.get("gitops"), known_services() | set(ids))
     for p in meta.get("gitops_pin") or []:
         if p.get("service") not in ids:
             errs.append(f"gitops_pin: unknown service '{p.get('service')}'")
@@ -217,10 +229,17 @@ def check(path: Path) -> list[str]:
             topo_levels(repos)
         except ValueError as e:
             errs.append(str(e))
-    errs += check_contract(meta, body)
+    late += check_contract(meta, body)
     if meta["status"] == "completed" and not all(r.get("done") for r in repos):
         errs.append("status is completed but not every repo is done")
-    return errs
+    if meta["status"] in FINISHED:
+        if not late:
+            return errs, []
+        missing = (["no `gitops:` list"] if any("gitops" in m for m in late) else []) + \
+            [f"no `### {h}`" for h in ("Errors", "Timeouts") if any(f"### {h}" in m for m in late)] + \
+            (["no `## Contract`"] if any("needs a contract" in m for m in late) else [])
+        return errs, [f"{meta['status']} before specs 045/053 — {', '.join(missing) or '; '.join(late)} (nothing to do)"]
+    return errs + late, []
 
 
 def plan_path(slug: str) -> Path:
@@ -246,7 +265,10 @@ def main(argv: list[str]) -> int:
         targets = [plan_path(s) for s in rest] if rest else plans
         bad = 0
         for p in targets:
-            for e in check(p):
+            errors, warnings = check_all(p)
+            for w in warnings:
+                print(f"WARNING: {p.relative_to(ROOT)}: {w}")
+            for e in errors:
                 print(f"ERROR: {p.relative_to(ROOT)}: {e}", file=sys.stderr)
                 bad += 1
         print(f"OK: {len(targets)} plan(s) valid" if not bad else f"{bad} error(s)")
