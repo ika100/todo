@@ -3,7 +3,7 @@ plan_id: 002-update-a-notice
 spec: 002-update-a-notice
 feature: Edit a todo's title in place in the list (todo-web), persisted by todo-api through PATCH /todos/{id}
 gitops_app: ika100/todo
-status: in_progress
+status: completed
 repos:
 - id: todo-api
   shape: service-python
@@ -25,7 +25,7 @@ repos:
     (history is a non-goal). No schema migration is needed: the existing CHECK on `title` already covers 1..200.
     Acceptance tests against a real Postgres, like spec 001.
   depends_on: []
-  done: false
+  done: true
 - id: todo-web
   shape: web-nextjs
   summary: Edit a todo's title in place in the list (Edit, Save, Cancel, Enter/Escape, click outside cancels)
@@ -47,7 +47,7 @@ repos:
     second client). Saving sends `{"title": ...}` only, never `done`, so a concurrent toggle in another tab is not
     overwritten. Test against a mocked todo-api that follows the contract below.
   depends_on: []
-  done: false
+  done: true
 gitops_pin: []
 ---
 
