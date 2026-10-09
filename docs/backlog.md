@@ -7,4 +7,5 @@ One line per feature spec; the specs live in `docs/specs/`.
 | Spec | Priority | Status | Criteria | Tracks |
 |---|---|---|---|---|
 | [001-todo-list](specs/001-todo-list/spec.md) — Todo list | P1 | done | 14 |  |
+| [002-update-a-notice](specs/002-update-a-notice/spec.md) — Edit a todo's title | P1 | done | 11 |  |
 <!-- spec-index:end -->
