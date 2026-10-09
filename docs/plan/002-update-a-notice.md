@@ -25,7 +25,7 @@ repos:
     (history is a non-goal). No schema migration is needed: the existing CHECK on `title` already covers 1..200.
     Acceptance tests against a real Postgres, like spec 001.
   depends_on: []
-  done: false
+  done: true
 - id: todo-web
   shape: web-nextjs
   summary: Edit a todo's title in place in the list (Edit, Save, Cancel, Enter/Escape, click outside cancels)
