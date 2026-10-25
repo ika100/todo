@@ -1,9 +1,9 @@
 {
   "lockfile_version": "1",
   "packages": {
-    "detect-secrets@latest": {
-      "last_modified": "2026-08-27T07:16:00Z",
-      "resolved": "github:NixOS/nixpkgs/c27cdad491a991b11ed731760aa2ef8db0cb0410#detect-secrets",
+    "detect-secrets@1.5.0": {
+      "last_modified": "2026-10-02T22:55:44Z",
+      "resolved": "github:NixOS/nixpkgs/55ba7f49ef2962b42cbd126522b7df5f95037679#detect-secrets",
       "source": "devbox-search",
       "version": "1.5.0",
       "systems": {
@@ -11,29 +11,29 @@
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/nyw0474187yl5kl03hq8y0p00n187cn9-python3.14-detect-secrets-1.5.0",
+              "path": "/nix/store/b60k4jyj113a0d9d41yw483yahbvxm1g-python3.14-detect-secrets-1.5.0",
               "default": true
             },
             {
               "name": "dist",
-              "path": "/nix/store/5hx9i3pl9byl450sx2c3rmxh6y3whnka-python3.14-detect-secrets-1.5.0-dist"
+              "path": "/nix/store/5khqh6hc1kv528rygvsy7aq8c2r5sdlf-python3.14-detect-secrets-1.5.0-dist"
             }
           ],
-          "store_path": "/nix/store/nyw0474187yl5kl03hq8y0p00n187cn9-python3.14-detect-secrets-1.5.0"
+          "store_path": "/nix/store/b60k4jyj113a0d9d41yw483yahbvxm1g-python3.14-detect-secrets-1.5.0"
         },
         "aarch64-linux": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/n9zkj9vas9xznc1j5f7sl3pfs0fj4kw1-python3.14-detect-secrets-1.5.0",
+              "path": "/nix/store/70k2cx0v52sadh88jda19rnmiak363hr-python3.14-detect-secrets-1.5.0",
               "default": true
             },
             {
               "name": "dist",
-              "path": "/nix/store/l94g177qcfh44azmwwwgs8mfn7ki4py8-python3.14-detect-secrets-1.5.0-dist"
+              "path": "/nix/store/56bnpqkdygh05qxm9y05yrc5x9y7pisa-python3.14-detect-secrets-1.5.0-dist"
             }
           ],
-          "store_path": "/nix/store/n9zkj9vas9xznc1j5f7sl3pfs0fj4kw1-python3.14-detect-secrets-1.5.0"
+          "store_path": "/nix/store/70k2cx0v52sadh88jda19rnmiak363hr-python3.14-detect-secrets-1.5.0"
         },
         "x86_64-darwin": {
           "outputs": [
@@ -53,15 +53,15 @@
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/a096glr5z43hnl5n94af98m1xn3xbfv3-python3.14-detect-secrets-1.5.0",
+              "path": "/nix/store/8yfilr4hmksvaifvd0j570jddqa5b4lc-python3.14-detect-secrets-1.5.0",
               "default": true
             },
             {
               "name": "dist",
-              "path": "/nix/store/l4mv3pimd38d0ngbhr6xil8ylf1f40x9-python3.14-detect-secrets-1.5.0-dist"
+              "path": "/nix/store/iyhikizgq2b0wcr584dh30lagnzmlkll-python3.14-detect-secrets-1.5.0-dist"
             }
           ],
-          "store_path": "/nix/store/a096glr5z43hnl5n94af98m1xn3xbfv3-python3.14-detect-secrets-1.5.0"
+          "store_path": "/nix/store/8yfilr4hmksvaifvd0j570jddqa5b4lc-python3.14-detect-secrets-1.5.0"
         }
       }
     },
@@ -350,9 +350,9 @@
         }
       }
     },
-    "kubeconform@latest": {
-      "last_modified": "2026-08-27T07:16:00Z",
-      "resolved": "github:NixOS/nixpkgs/c27cdad491a991b11ed731760aa2ef8db0cb0410#kubeconform",
+    "kubeconform@0.8.0": {
+      "last_modified": "2026-10-02T22:55:44Z",
+      "resolved": "github:NixOS/nixpkgs/55ba7f49ef2962b42cbd126522b7df5f95037679#kubeconform",
       "source": "devbox-search",
       "version": "0.8.0",
       "systems": {
@@ -360,31 +360,31 @@
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/k090c6zznd5086xnm8lkddk8rn3abrk9-kubeconform-0.8.0",
+              "path": "/nix/store/hnqjmfc8n90dlaybqwym6imxjhg4iw73-kubeconform-0.8.0",
               "default": true
             }
           ],
-          "store_path": "/nix/store/k090c6zznd5086xnm8lkddk8rn3abrk9-kubeconform-0.8.0"
+          "store_path": "/nix/store/hnqjmfc8n90dlaybqwym6imxjhg4iw73-kubeconform-0.8.0"
         },
         "aarch64-linux": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/nkcwqmxw2brhbg9biyzhzag3iq48c61p-kubeconform-0.8.0",
+              "path": "/nix/store/i986nlp5rpimb8ml7iv7rinpjm9vjg2g-kubeconform-0.8.0",
               "default": true
             }
           ],
-          "store_path": "/nix/store/nkcwqmxw2brhbg9biyzhzag3iq48c61p-kubeconform-0.8.0"
+          "store_path": "/nix/store/i986nlp5rpimb8ml7iv7rinpjm9vjg2g-kubeconform-0.8.0"
         },
         "x86_64-linux": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/8lx6dl594qwr75gk40nxk18p0na6cqy5-kubeconform-0.8.0",
+              "path": "/nix/store/dwnkgd9wgnsmmhzbgwkrz3ksspzyslw2-kubeconform-0.8.0",
               "default": true
             }
           ],
-          "store_path": "/nix/store/8lx6dl594qwr75gk40nxk18p0na6cqy5-kubeconform-0.8.0"
+          "store_path": "/nix/store/dwnkgd9wgnsmmhzbgwkrz3ksspzyslw2-kubeconform-0.8.0"
         }
       }
     },
@@ -453,51 +453,41 @@
         }
       }
     },
-    "kustomize@latest": {
-      "last_modified": "2026-08-27T07:16:00Z",
-      "resolved": "github:NixOS/nixpkgs/c27cdad491a991b11ed731760aa2ef8db0cb0410#kustomize",
+    "kustomize@5.8.2": {
+      "last_modified": "2026-10-02T22:55:44Z",
+      "resolved": "github:NixOS/nixpkgs/55ba7f49ef2962b42cbd126522b7df5f95037679#kustomize",
       "source": "devbox-search",
-      "version": "5.8.1",
+      "version": "5.8.2",
       "systems": {
         "aarch64-darwin": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/xasxmm4hzrvb0m7ywc6fqvfh283914fq-kustomize-5.8.1",
+              "path": "/nix/store/sic7y2w7cf7cx0pf9v62r1l81r6l70zb-kustomize-5.8.2",
               "default": true
             }
           ],
-          "store_path": "/nix/store/xasxmm4hzrvb0m7ywc6fqvfh283914fq-kustomize-5.8.1"
+          "store_path": "/nix/store/sic7y2w7cf7cx0pf9v62r1l81r6l70zb-kustomize-5.8.2"
         },
         "aarch64-linux": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/ks3x95mpnwb4s96m7qqi5nm7nv2z5qam-kustomize-5.8.1",
+              "path": "/nix/store/84yddq0f1y91ajb0nlr10g9qz100anrv-kustomize-5.8.2",
               "default": true
             }
           ],
-          "store_path": "/nix/store/ks3x95mpnwb4s96m7qqi5nm7nv2z5qam-kustomize-5.8.1"
-        },
-        "x86_64-darwin": {
-          "outputs": [
-            {
-              "name": "out",
-              "path": "/nix/store/7hx9cv1yxfd01k33aaxay05a8pzm3gja-kustomize-5.8.1",
-              "default": true
-            }
-          ],
-          "store_path": "/nix/store/7hx9cv1yxfd01k33aaxay05a8pzm3gja-kustomize-5.8.1"
+          "store_path": "/nix/store/84yddq0f1y91ajb0nlr10g9qz100anrv-kustomize-5.8.2"
         },
         "x86_64-linux": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/fj2l9vlrs30xp2jn5imh0c8vn05pb75c-kustomize-5.8.1",
+              "path": "/nix/store/zv9yli93qx358p58h6cph8v35p1pf2nk-kustomize-5.8.2",
               "default": true
             }
           ],
-          "store_path": "/nix/store/fj2l9vlrs30xp2jn5imh0c8vn05pb75c-kustomize-5.8.1"
+          "store_path": "/nix/store/zv9yli93qx358p58h6cph8v35p1pf2nk-kustomize-5.8.2"
         }
       }
     },

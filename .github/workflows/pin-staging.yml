@@ -1,0 +1,114 @@
+name: pin-staging
+
+# Spec 093 / ADR-041: a build of a service that passed its smoke tests in dev is promoted to staging. `cplat ship deploy`
+# sends `repository_dispatch` (event pin-staging, payload {service, tag, spec, smoke, record}) after the green dev smoke when
+# `promotion.staging` is `auto` (app.yaml, or on the service in services.yaml). This workflow is the twin of pin-dev.yml:
+# it pins the tag in staging on a branch, opens a PR, closes older automatic staging PRs of the service, runs ci.yml on the
+# branch (a reusable-workflow call) and merges the PR only when every check passed. A red CI leaves the PR open with a
+# comment, and staging keeps its old image. It can only pin staging: prod is promoted only by `/gitops:promote`.
+run-name: pin-staging ${{ github.event.client_payload.service }} ${{ github.event.client_payload.tag }}   # ship deploy finds this run by name
+on:
+  repository_dispatch:
+    types: [pin-staging]
+
+permissions:
+  contents: write        # push the pin branch, merge the PR
+  pull-requests: write   # open, close superseded, comment, merge
+  actions: write         # dispatch ci.yml on the pin branch (protected-branch fallback)
+
+concurrency:
+  group: pin-staging-${{ github.event.client_payload.service }}
+  cancel-in-progress: false
+
+jobs:
+  pin:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    outputs:
+      branch: ${{ steps.pin.outputs.branch }}
+      pr: ${{ steps.pin.outputs.pr }}
+      previous: ${{ steps.pin.outputs.previous }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: Pin staging and open the PR
+        id: pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SERVICE: ${{ github.event.client_payload.service }}
+          TAG: ${{ github.event.client_payload.tag }}
+          SPEC: ${{ github.event.client_payload.spec }}
+          SMOKE: ${{ github.event.client_payload.smoke }}
+          RECORD: ${{ github.event.client_payload.record }}
+        run: |
+          set -euo pipefail
+          [[ "$SERVICE" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "::error::invalid service '$SERVICE'"; exit 1; }
+          [[ "$TAG" =~ ^sha-[0-9a-f]{40}$ ]] || { echo "::error::invalid tag '$TAG' (expected sha-<40 hex>)"; exit 1; }
+          [[ -z "$RECORD" || "$RECORD" == https://github.com/* ]] || { echo "::error::invalid record '$RECORD'"; exit 1; }
+          out=$(uv run scripts/pin.py staging "$SERVICE" "$TAG")
+          echo "$out"
+          old=$(printf '%s\n' "$out" | sed -n "s/^.* in staging: \(.*\) -> .*$/\1/p" | head -n 1)
+          uv run scripts/render.py --check
+          if git diff --quiet; then echo "::notice::staging already runs $SERVICE:$TAG"; exit 0; fi
+          sha="${TAG#sha-}"; branch="pin/staging-$SERVICE-${sha::7}"   # the branch keeps the short sha
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git commit --signoff -am "chore(staging): promote $SERVICE to $TAG"
+          git push -u origin "$branch"
+          body=$(mktemp)
+          {
+            printf "Opened automatically under spec 093: a build of \`%s\` passed its smoke tests in dev, so staging follows it.\\n\\n" "$SERVICE"
+            printf -- "- service: \`%s\`\\n" "$SERVICE"
+            printf -- "- new tag: \`%s\`\\n" "$TAG"
+            printf -- "- staging ran before: \`%s\`\\n" "$old"
+            printf -- '- dev smoke: %s (spec %s), run record: %s\n\n' "$SMOKE" "$SPEC" "${RECORD:-not stored}"
+            printf "Merges itself when the gitops-app CI passes. If CI fails, the PR stays open and staging keeps \`%s\`.\\n" "$old"
+            printf "Revert this PR to put staging back on \`%s\`.\\n" "$old"
+          } > "$body"
+          url=$(gh pr create --base main --head "$branch" --title "chore(staging): promote $SERVICE to $TAG (automatic, spec 093)" \
+            --body-file "$body")
+          for older in $(gh pr list --state open --json number,headRefName \
+              --jq ".[] | select(.headRefName | startswith(\"pin/staging-$SERVICE-\")) | select(.headRefName != \"$branch\") | .number"); do
+            gh pr close "$older" --delete-branch --comment "Superseded by $url (a newer build of $SERVICE passed dev smoke)." || true
+          done
+          { echo "branch=$branch"; echo "pr=$url"; echo "previous=$old"; } >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: pin
+    if: needs.pin.outputs.pr != ''
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.pin.outputs.branch }}
+
+  merge:
+    needs: [pin, ci]
+    if: always() && needs.pin.outputs.pr != ''
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - name: Merge when CI passed, otherwise leave the PR open
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ needs.pin.outputs.pr }}
+          BRANCH: ${{ needs.pin.outputs.branch }}
+          PREVIOUS: ${{ needs.pin.outputs.previous }}
+          CI_RESULT: ${{ needs.ci.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$CI_RESULT" != "success" ]; then
+            gh pr comment "$PR" --body "CI on this promotion ended with **$CI_RESULT** ($RUN_URL), so it was not merged and staging keeps \`$PREVIOUS\`."
+            echo "::error::CI $CI_RESULT: $PR stays open, staging keeps $PREVIOUS"
+            exit 1
+          fi
+          if gh pr merge "$PR" --squash --delete-branch; then
+            echo "merged $PR after green CI"
+            exit 0
+          fi
+          # Branch protection that requires checks from the PR itself (paid plans): run CI on the PR and let auto-merge wait.
+          gh workflow run ci.yml --ref "$BRANCH"
+          gh pr merge "$PR" --auto --squash --delete-branch
+          echo "::notice::branch protection requires PR checks: auto-merge is on for $PR"
