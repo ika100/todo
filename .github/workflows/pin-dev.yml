@@ -1,17 +1,20 @@
 name: pin-dev
 
 # Spec 062 / ADR-027: every merge to a service's main pins dev to that build. The service's CI sends
-# `repository_dispatch` (event pin-dev, payload {service, tag}); this workflow pins the tag on a branch, opens a PR,
-# runs ci.yml on it (PRs and pushes made with GITHUB_TOKEN start no workflows, workflow_dispatch does) and turns on
-# auto-merge, so the PR merges once the required checks pass. A red CI leaves the PR open and dev on the old image.
+# `repository_dispatch` (event pin-dev, payload {service, tag}); this workflow pins the tag on a branch and opens a PR.
+# Spec 065 / ADR-028: it then runs ci.yml on that branch itself (a reusable-workflow call, so no runner waits on
+# another) and merges the PR only when every check passed. That needs no branch protection or auto-merge, which
+# private repos on GitHub Free do not have. A red CI leaves the PR open, comments the failed run, and dev keeps the
+# old image. Where branch protection does require checks, the merge falls back to auto-merge after a CI run on the PR.
+run-name: pin-dev ${{ github.event.client_payload.service }} ${{ github.event.client_payload.tag }}   # spec 077: ship deploy finds this run by name
 on:
   repository_dispatch:
     types: [pin-dev]
 
 permissions:
-  contents: write        # push the pin branch
-  pull-requests: write   # open, close superseded, enable auto-merge
-  actions: write         # dispatch ci.yml on the pin branch
+  contents: write        # push the pin branch, merge the PR
+  pull-requests: write   # open, close superseded, comment, merge
+  actions: write         # dispatch ci.yml on the pin branch (protected-branch fallback)
 
 concurrency:
   group: pin-dev-${{ github.event.client_payload.service }}
@@ -19,12 +22,16 @@ concurrency:
 
 jobs:
   pin:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    outputs:
+      branch: ${{ steps.pin.outputs.branch }}
+      pr: ${{ steps.pin.outputs.pr }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
 
-      - name: Pin dev, open the PR, merge it after CI
+      - name: Pin dev and open the PR
+        id: pin
         env:
           GH_TOKEN: ${{ github.token }}
           SERVICE: ${{ github.event.client_payload.service }}
@@ -32,11 +39,11 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$SERVICE" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "::error::invalid service '$SERVICE'"; exit 1; }
-          [[ "$TAG" =~ ^sha-[0-9a-f]{7}$ ]] || { echo "::error::invalid tag '$TAG' (expected sha-<7 hex>)"; exit 1; }
+          [[ "$TAG" =~ ^sha-([0-9a-f]{40}|[0-9a-f]{7})$ ]] || { echo "::error::invalid tag '$TAG' (expected sha-<40 hex>)"; exit 1; }
           uv run scripts/pin.py dev "$SERVICE" "$TAG"
           uv run scripts/render.py --check
           if git diff --quiet; then echo "::notice::dev already runs $SERVICE:$TAG"; exit 0; fi
-          branch="pin/dev-$SERVICE-${TAG#sha-}"
+          sha="${TAG#sha-}"; branch="pin/dev-$SERVICE-${sha::7}"   # the branch keeps the short sha
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$branch"
@@ -48,5 +55,43 @@ jobs:
               --jq ".[] | select(.headRefName | startswith(\"pin/dev-$SERVICE-\")) | select(.headRefName != \"$branch\") | .number"); do
             gh pr close "$old" --delete-branch --comment "Superseded by $url" || true
           done
-          gh workflow run ci.yml --ref "$branch"
-          gh pr merge "$url" --auto --squash --delete-branch
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "pr=$url" >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: pin
+    if: needs.pin.outputs.pr != ''
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.pin.outputs.branch }}
+
+  merge:
+    needs: [pin, ci]
+    if: always() && needs.pin.outputs.pr != ''
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - name: Merge when CI passed, otherwise leave the PR open
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ needs.pin.outputs.pr }}
+          BRANCH: ${{ needs.pin.outputs.branch }}
+          CI_RESULT: ${{ needs.ci.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$CI_RESULT" != "success" ]; then
+            gh pr comment "$PR" --body "CI on this pin ended with **$CI_RESULT** ($RUN_URL), so it was not merged and dev keeps the previous image. A newer build of the service supersedes this PR; or fix and merge it by hand."
+            echo "::error::CI $CI_RESULT: $PR stays open, dev keeps the previous image"
+            exit 1
+          fi
+          if gh pr merge "$PR" --squash --delete-branch; then
+            echo "merged $PR after green CI"
+            exit 0
+          fi
+          # Branch protection that requires checks from the PR itself (paid plans): run CI on the PR and let auto-merge wait.
+          gh workflow run ci.yml --ref "$BRANCH"
+          gh pr merge "$PR" --auto --squash --delete-branch
+          echo "::notice::branch protection requires PR checks: auto-merge is on for $PR"

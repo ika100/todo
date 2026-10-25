@@ -1,0 +1,30 @@
+# Alert issues (spec 092, ADR-038): every 15 minutes, firing alerts become issues in the owning repo.
+# Runs only on the self-hosted runner (CI_RUNNER): the cluster's query API is not reachable from GitHub-hosted runners.
+# Start by hand with dry_run to see what would be filed: gh workflow run alerts.yml -f dry_run=true
+name: alerts
+run-name: "${{ vars.CI_RUNNER == '' && 'alert poll skipped: needs the self-hosted runner (set the CI_RUNNER variable)' || (inputs.dry_run && 'alert poll (dry run)' || 'alert poll') }}"
+on:
+  schedule: [{cron: "*/15 * * * *"}]
+  workflow_dispatch:
+    inputs:
+      dry_run: {description: "print what would be filed, commented, reopened or closed; change nothing", type: boolean, default: false}
+permissions: {contents: read, issues: write, actions: read}
+concurrency: {group: alert-poll, cancel-in-progress: false}
+jobs:
+  poll:
+    name: "${{ vars.CI_RUNNER == '' && 'alert poll skipped: needs the self-hosted runner (set the CI_RUNNER variable)' || 'alert poll' }}"
+    if: vars.CI_RUNNER != ''
+    runs-on: ${{ vars.CI_RUNNER }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Poll
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALERTS_TOKEN: ${{ secrets.ALERTS_TOKEN }}
+          ALERTS_QUERY_AUTHORIZATION: ${{ secrets.ALERTS_QUERY_AUTHORIZATION }}
+          ALERTS_PROMETHEUS_URL: ${{ vars.ALERTS_PROMETHEUS_URL }}
+          ALERTS_DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+        run: devbox run alert-poll
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always() && !inputs.dry_run
+        with: {name: alert-poll-state, path: .alert-poll/state.json, retention-days: 3, if-no-files-found: ignore}

@@ -273,7 +273,7 @@ spec:
       containers:
         - name: lgtm
           image: grafana/otel-lgtm:${lgtm_version}
-          ports: [{name: grafana, containerPort: 3000}, {name: otlp-grpc, containerPort: 4317}, {name: otlp-http, containerPort: 4318}]
+          ports: [{name: grafana, containerPort: 3000}, {name: otlp-grpc, containerPort: 4317}, {name: otlp-http, containerPort: 4318}, {name: prometheus, containerPort: 9090}]
           readinessProbe: {httpGet: {path: /api/health, port: grafana}, initialDelaySeconds: 20, periodSeconds: 5}
           resources: {requests: {cpu: 200m, memory: 512Mi}, limits: {memory: 2Gi}}
 ---
@@ -286,6 +286,7 @@ spec:
     - {name: grafana, port: 3000, targetPort: grafana}
     - {name: otlp-grpc, port: 4317, targetPort: otlp-grpc}
     - {name: otlp-http, port: 4318, targetPort: otlp-http}
+    - {name: prometheus, port: 9090, targetPort: prometheus}
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute

@@ -2,11 +2,19 @@ name: ci
 
 on:
   push:
-    branches: [main, 'feature/**', 'fix/**', 'chore/**', 'docs/**', 'promote/**', 'compose/**']
+    # other branches get CI from their PR (and pin-dev through workflow_call) only; a push trigger on them too ran
+    # every job twice (sdlc-foundry #104)
+    branches: [main]
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, edited]   # edited: a corrected PR title is checked again
   workflow_dispatch:
+  workflow_call:          # spec 065: pin-dev runs these checks on its pin branch, then merges (no branch protection needed)
+    inputs:
+      ref:
+        description: "branch or SHA to check out; empty: the triggering ref"
+        type: string
+        default: ''
 
 # Least privilege by default; jobs that publish packages declare what they need.
 permissions:
@@ -14,33 +22,68 @@ permissions:
 
 # A newer push to the same pull request cancels the older run (main and tags always run to completion).
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}${{ github.event.action == 'edited' && '-edited' || '' }}   # a title edit never cancels a running build
+  group: ci-${{ inputs.ref || github.event.pull_request.number || github.ref }}${{ github.event.action == 'edited' && '-edited' || '' }}   # a title edit never cancels a running build
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   quality:
     name: quality (render-check + kustomize build + kubeconform + labels)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
       - uses: jetify-com/devbox-install-action@8c6a66ed6273138b1915457069de78cb52fe3bd7 # v0.15.0
+        if: runner.environment == 'github-hosted'   # self-hosted runner images ship devbox (docs/self-hosted-runners.md)
         with:
           enable-cache: true
+      - name: service CRDs (Service-ref marker, spec 098)
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          SERVICE_REPOS_READ_TOKEN: ${{ secrets.SERVICE_REPOS_READ_TOKEN }}
+        run: devbox run service-crds
       - run: devbox run quality
 
   security:
     name: security (detect-secrets)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
       - uses: jetify-com/devbox-install-action@8c6a66ed6273138b1915457069de78cb52fe3bd7 # v0.15.0
+        if: runner.environment == 'github-hosted'   # self-hosted runner images ship devbox (docs/self-hosted-runners.md)
         with:
           enable-cache: true
       - run: devbox run security
 
+  ci-extra:
+    name: ci-extra
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Is a ci-extra recipe defined?
+        id: recipe
+        run: |
+          if grep -qs '"ci-extra"[[:space:]]*:' devbox.json; then
+            echo "defined=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "defined=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::no ci-extra recipe is defined in devbox.json: nothing to run (spec 086)"
+          fi
+      - uses: jetify-com/devbox-install-action@8c6a66ed6273138b1915457069de78cb52fe3bd7 # v0.15.0
+        if: runner.environment == 'github-hosted' && steps.recipe.outputs.defined == 'true'   # self-hosted runner images ship devbox (docs/self-hosted-runners.md)
+        with:
+          enable-cache: true
+      - run: devbox run ci-extra
+        if: steps.recipe.outputs.defined == 'true'
+
   pr-title:
     name: pr-title (conventional commits)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     if: github.event_name == 'pull_request'
     steps:
       - name: Validate PR title

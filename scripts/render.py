@@ -37,13 +37,39 @@ services.yaml entry (written by `/gitops:compose`, every value explicit and revi
     expose: {host: todo-api}           # optional: publish through the Gateway (needs app.yaml `hosts`)
     environments: [dev]
 
+External entry (spec 069, ADR-029): a service whose manifests this generator cannot express (CronJobs, volumes,
+a login proxy, a Helm chart with CRDs). The package is still owned by this repo or pinned to the service repo's chart;
+render.py only wires it into the environments and pins its image, so pin-dev, /gitops:promote and /shared:status work:
+  - name: stock-manager
+    repo: org/stock-manager
+    image: ghcr.io/org/stock-manager
+    external:
+      kustomize: external/stock-manager   # a kustomize package under applications/<app>/ ({env} allowed in the path)
+      namespace: stock-manager            # optional: instead of <app>-<env>
+    environments: [dev]
+  - name: ai-ops
+    repo: org/ai-ops
+    image: ghcr.io/org/ai-ops
+    external:
+      helm: {repoURL: https://github.com/org/ai-ops, path: charts/ai-ops, revision: main, imageTag: image.tag}  # releaseName: defaults to the service name
+      namespace: ai-ops
+      values: {replicas: 1}               # helm values for every environment
+      envValues: {prod: {replicas: 2}}    # merged over `values` per environment
+    environments: [dev]
+
 applications/<app>/app.yaml (optional):
   gateway: {name: traefik-gateway, namespace: kube-system}
   hosts: {dev: "{service}.{app}-dev.localhost"}     # per env; no entry = not exposed in that env
+  urls: {dev: "http://{host}:8088"}                 # optional, read by `cplat smoke` (spec 091), not by render: the URL smoke tests use
   secretStore: {name: platform-secrets, kind: ClusterSecretStore}   # where `remote` secrets are read from
   policies: {mode: {dev: Audit, staging: Audit, prod: Enforce}, registries: []}   # Kyverno guard rails per environment (ADR-022)
   addons:                                           # backing services, one per application and environment (ADR-020)
     postgres: {version: 17, instances: {dev: 1, prod: 3}, storage: {dev: 1Gi, prod: 20Gi}}
+    observability:                                  # alert issues (spec 092), read only by the alert poll; validated here
+      alerts: true                                  # false: the poll skips this app
+      rules: [{name: HighErrorRate, query: "<PromQL>", severity: warning, summary: "optional"}]   # critical | warning | info
+      queryURL: https://prom.example.com/api/prom   # optional; querySecret: <name> or <namespace>/<name> (key AUTHORIZATION)
+      alertmanagerURL: https://am.example.com       # optional
 
 Usage:
   render.py            write files
@@ -60,13 +86,15 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 ENVS = ["dev", "staging", "prod"]
-MANAGED_FILES = {"deployment.yaml", "service.yaml", "httproute.yaml", "kustomization.yaml", "password-generator.yaml"}
+MANAGED_FILES = {"deployment.yaml", "service.yaml", "httproute.yaml", "kustomization.yaml", "password-generator.yaml", "application.yaml"}
+# Keys an external entry may carry: its package owns ports, probes, secrets and exposure (spec 069).
+EXTERNAL_KEYS = {"name", "repo", "shape", "image", "external", "environments"}
 MANAGED_PREFIXES = ("externalsecret-",)
 # Addon contract (ADR-020): what a service gets when it `uses` an addon. Services never see the implementation.
 ADDONS = {
     "postgres": {
         "secret": "{app}-postgres-app",    # connection Secret written by the operator (CloudNativePG)
-        "env": {"DATABASE_URL": "uri", "PGHOST": "host", "PGPORT": "port", "PGDATABASE": "dbname", "PGUSER": "user", "PGPASSWORD": "password"},
+        "env": {"DATABASE_URL": "uri", "PGHOST": "host", "PGPORT": "port", "PGDATABASE": "dbname", "PGUSER": "user", "PGPASSWORD": "password"},  # pragma: allowlist secret
         "defaults": {"version": 17, "instances": 1, "storage": "1Gi"},
     },
     # OpenTelemetry base (ADR-021): applies to every service, no `uses`. A collector per environment receives OTLP and scrapes
@@ -121,6 +149,9 @@ def load_services(app_dir: Path) -> list[dict]:
         raise RenderError(f"duplicate service names in {app_dir.name}/services.yaml")
     for s in services:
         n = s.get("name", "<no name>")
+        if "external" in s:
+            validate_external(app_dir, s)
+            continue
         if "port" not in s or "probes" not in s:
             raise RenderError(
                 f"service '{n}' uses the v1 format (remote kustomize base). v2 needs port/probes/...: "
@@ -135,6 +166,83 @@ def load_services(app_dir: Path) -> list[dict]:
         if bad:
             raise RenderError(f"service '{n}': unknown environments {bad} (valid: {ENVS})")
     return services
+
+
+def validate_external(app_dir: Path, s: dict) -> None:
+    n = s["name"]
+    if "image" not in s:
+        raise RenderError(f"service '{n}': missing 'image' (the pin applies to it)")
+    extra = sorted(set(s) - EXTERNAL_KEYS)
+    if extra:
+        raise RenderError(f"service '{n}' is external: {', '.join(extra)} belong in its package, not in services.yaml")
+    ext = s["external"] or {}
+    kinds = [k for k in ("kustomize", "helm") if k in ext]
+    if len(kinds) != 1:
+        raise RenderError(f"service '{n}': external needs exactly one of `kustomize: <path>` or `helm: {{repoURL, path}}`")
+    bad = [e for e in s.get("environments", ["dev"]) if e not in ENVS]
+    if bad:
+        raise RenderError(f"service '{n}': unknown environments {bad} (valid: {ENVS})")
+    if "kustomize" in ext:
+        for env in s.get("environments", ["dev"]):
+            pkg = app_dir / str(ext["kustomize"]).format(env=env)
+            if not (pkg / "kustomization.yaml").is_file():
+                raise RenderError(f"service '{n}': {pkg.relative_to(ROOT)}/kustomization.yaml does not exist")
+    else:
+        helm = ext["helm"] or {}
+        for k in ("repoURL", "path"):
+            if not helm.get(k):
+                raise RenderError(f"service '{n}': external.helm needs `{k}`")
+    ns = ext.get("namespace")
+    if ns is not None and not SECRET_NAME.match(str(ns)):
+        raise RenderError(f"service '{n}': external.namespace '{ns}' must be a lowercase DNS label")
+
+
+def deep_merge(base: dict, over: dict) -> dict:
+    out = dict(base)
+    for k, v in (over or {}).items():
+        out[k] = deep_merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
+def set_path(doc: dict, dotted: str, value) -> dict:
+    """`image.tag` -> {"image": {"tag": value}} merged into doc."""
+    keys = dotted.split(".")
+    nested: dict = {keys[-1]: value}
+    for k in reversed(keys[:-1]):
+        nested = {k: nested}
+    return deep_merge(doc, nested)
+
+
+def external_files(app: str, svc: dict, env: str, tag: str, server: str) -> dict[str, dict]:
+    """The overlay of an external service: its package (kustomize) or an Argo Application for its chart (helm)."""
+    ext = svc["external"]
+    image = {"name": svc["image"], "newTag": tag}
+    kust: dict = {"apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": "Kustomization"}
+    if "kustomize" in ext:
+        kust["resources"] = ["../../../" + str(ext["kustomize"]).format(env=env).strip("/")]
+        if ext.get("namespace"):
+            kust["namespace"] = ext["namespace"]
+        kust["images"] = [image]
+        return {"kustomization.yaml": kust}
+    helm = ext["helm"]
+    values = deep_merge(ext.get("values") or {}, (ext.get("envValues") or {}).get(env) or {})
+    values = set_path(values, str(helm.get("imageTag") or "image.tag"), tag)
+    application = {
+        "apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+        "metadata": {"name": f"{svc['name']}-{env}-chart", "namespace": "argocd",
+                     "labels": {"app.kubernetes.io/part-of": app, "app.kubernetes.io/managed-by": "gitops-app"}},
+        "spec": {
+            "project": "default",
+            "source": {"repoURL": helm["repoURL"], "path": helm["path"], "targetRevision": str(helm.get("revision") or "main"),
+                       "helm": {"releaseName": str(helm.get("releaseName") or svc["name"]), "valuesObject": values}},
+            "destination": {"server": server, "namespace": ext.get("namespace") or f"{app}-{env}"},
+            "syncPolicy": {"automated": {"prune": True, "selfHeal": True},
+                           "syncOptions": ["CreateNamespace=true", "ServerSideApply=true"]},
+        },
+    }
+    kust["resources"] = ["application.yaml"]
+    kust["images"] = [image]        # not used by kustomize here; it is where pin.py, promote and status read the pin
+    return {"application.yaml": application, "kustomization.yaml": kust}
 
 
 def validate_secrets(s: dict) -> None:
@@ -163,6 +271,49 @@ def validate_secrets(s: dict) -> None:
 def per_env(value, env: str, default):
     """A scalar, or a per-environment map ({dev: 1, prod: 3}); missing environments fall back to `default`."""
     return value.get(env, default) if isinstance(value, dict) else (default if value is None else value)
+
+
+ALERT_SEVERITIES = ("critical", "warning", "info")
+DNS_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+
+
+def validate_alerts(obs: dict) -> None:
+    """Alert settings under the observability addon (spec 092). Only the poll reads them; the manifests do not change."""
+    if "alerts" in obs and not isinstance(obs["alerts"], bool):
+        raise RenderError("app.yaml: observability.alerts must be true or false")
+    for key in ("queryURL", "alertmanagerURL"):
+        if key in obs and not (isinstance(obs[key], str) and obs[key].startswith(("http://", "https://"))):
+            raise RenderError(f"app.yaml: observability.{key} must be an http(s) URL")
+    if "querySecret" in obs:
+        parts = str(obs["querySecret"]).split("/") if isinstance(obs["querySecret"], str) else []
+        if not 1 <= len(parts) <= 2 or not all(DNS_LABEL.match(p) for p in parts):
+            raise RenderError("app.yaml: observability.querySecret must be <name> or <namespace>/<name>")
+    if "rules" not in obs or obs["rules"] is None:
+        return
+    shape = "app.yaml: observability.rules must be a list of {name, query, severity, summary}"
+    if not isinstance(obs["rules"], list):
+        raise RenderError(shape)
+    seen: set[str] = set()
+    for i, rule in enumerate(obs["rules"]):
+        if not isinstance(rule, dict):
+            raise RenderError(f"app.yaml: observability.rules[{i}] (no name): rules must be a list of {{name, query, severity, summary}}")
+        name = rule.get("name")
+        label = name if isinstance(name, str) and name.strip() else "no name"
+
+        def bad(problem: str) -> RenderError:
+            return RenderError(f"app.yaml: observability.rules[{i}] ({label}): {problem}")
+
+        if label == "no name":
+            raise bad("a rule needs a name")
+        if rule.get("severity") not in ALERT_SEVERITIES:
+            raise bad(f"severity '{rule.get('severity')}' must be one of {', '.join(ALERT_SEVERITIES)}")
+        if name in seen:
+            raise bad(f"the name '{name}' is used twice")
+        seen.add(name)
+        if not isinstance(rule.get("query"), str) or not rule["query"].strip():
+            raise bad("query must be a non-empty string (PromQL)")
+        if "summary" in rule and not isinstance(rule["summary"], str):
+            raise bad("summary must be a string")
 
 
 def validate_addons(services: list[dict], cfg: dict) -> None:
@@ -195,6 +346,7 @@ def validate_addons(services: list[dict], cfg: dict) -> None:
             raise RenderError("app.yaml: observability.exportTo must be an http(s) OTLP/HTTP endpoint")
         if obs.get("headersSecret") and not obs.get("exportTo"):
             raise RenderError("app.yaml: observability.headersSecret needs exportTo")
+        validate_alerts(obs)
 
 
 def addons_in(services: list[dict], env: str, cfg: dict) -> list[str]:
@@ -224,6 +376,25 @@ def validate_policies(cfg: dict) -> None:
             raise RenderError(f"app.yaml: policies.mode for {env} must be Audit, Enforce or Off, got '{mode}'")
     if not isinstance(conf.get("registries") or [], list):
         raise RenderError("app.yaml: policies.registries must be a list of image prefixes, e.g. [ghcr.io/acme/]")
+
+
+def validate_promotion(services: list[dict], cfg: dict) -> None:
+    """`promotion` in app.yaml and on services (spec 093): staging may be auto; prod is never automatic."""
+    for where, conf in [("app.yaml", cfg.get("promotion"))] + [
+            (f"services.yaml ({s.get('name')})", s.get("promotion")) for s in services]:
+        if conf is None:
+            continue
+        if not isinstance(conf, dict):
+            raise RenderError(f"{where}: promotion must be a mapping, e.g. {{staging: auto}}")
+        for k, v in conf.items():
+            if k == "prod":
+                if v != "manual":
+                    raise RenderError(f"{where}: promotion.prod: prod is promoted only by /gitops:promote, never automatically "
+                                      "(spec 093); remove the key or set it to manual")
+            elif k != "staging":
+                raise RenderError(f"{where}: promotion.{k} is not a setting (only staging; dev always follows main)")
+            elif v not in ("auto", "manual"):
+                raise RenderError(f"{where}: promotion.staging must be auto or manual, got '{v}'")
 
 
 def allowed_registries(services: list[dict], cfg: dict, conf: dict) -> list[str]:
@@ -491,6 +662,7 @@ def render_app(app_dir: Path, ans: dict) -> dict[Path, str]:
     cfg = (yaml.safe_load(cfg_file.read_text()) or {}) if cfg_file.is_file() else {}
     validate_addons(services, cfg)
     validate_policies(cfg)
+    validate_promotion(services, cfg)
     org = ans.get("github_org", "ika100")
     server = ans.get("cluster_server", "https://kubernetes.default.svc")
     gitops_repo = f"https://github.com/{org}/{ans.get('project_name', app + '-gitops')}"
@@ -583,6 +755,11 @@ def render_app(app_dir: Path, ans: dict) -> dict[Path, str]:
             if env not in envs_of(s):
                 continue
             base = app_dir / "overlays" / env / s["name"]
+            if "external" in s:
+                tag = existing_tag(base / "kustomization.yaml") or "latest"
+                for fname, doc in external_files(app, s, env, tag, server).items():
+                    out[base / fname] = dump(doc)
+                continue
             files = {"deployment.yaml": deployment(app, s, env, obs_enabled(cfg)), "service.yaml": service(app, s)}
             route = httproute(app, s, env, cfg)
             if route:
