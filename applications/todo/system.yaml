@@ -33,6 +33,8 @@ components:
       tmp: /tmp
     env:
       LOG_LEVEL: INFO
+    provides:
+    - todo-api-rest
     uses:
     - postgres
     secretRefs: []
@@ -60,6 +62,8 @@ components:
     volumes:
       tmp: /tmp
       next-cache: /app/.next/cache
+    consumes:
+    - todo-api-rest
     env:
       NODE_ENV: production
       TODO_API_URL: http://todo-api
@@ -76,6 +80,9 @@ components:
       host: todo-web
     instances:
       dev: {}
+apis:
+  todo-api-rest:
+    type: openapi
 resources:
   postgres:
     type: database
