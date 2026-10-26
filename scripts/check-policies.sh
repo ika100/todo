@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Evaluate the rendered manifests against the platform's Kyverno guard rails, offline (shift-left, ADR-022).
-# For every applications/<app>/policies/<env>/policy.yaml, each service overlay and addon of that environment is built with
+# For every applications/<app>/policies/<env>/policy.yaml, each component overlay and resource of that environment is built with
 # kustomize and checked with the Kyverno CLI; any violation fails (also for Audit environments: a PR should not introduce one).
-# Without `policies:` in app.yaml there is nothing to check.
+# With every environment's `policy: off` in system.yaml there is nothing to check.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -30,7 +30,7 @@ for policy in applications/*/policies/*/policy.yaml; do
   done
 done
 if [ "$failed" = 1 ]; then
-  echo "ERROR: rendered manifests violate the guard rails (see ADR-022). Fix services.yaml/app.yaml and run \`devbox run render\`." >&2
+  echo "ERROR: rendered manifests violate the guard rails (see ADR-022). Fix system.yaml and run \`devbox run render\`." >&2
   exit 1
 fi
 echo "OK: $checked rendered workload(s) satisfy the Kyverno guard rails"

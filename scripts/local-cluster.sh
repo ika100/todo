@@ -24,11 +24,11 @@
 #   ESO_VERSION          External Secrets Operator chart version (default 2.12.0)
 #   WITH_ESO=0           skip External Secrets Operator (no `secrets:` support in that cluster)
 #   LGTM_VERSION         grafana/otel-lgtm image tag for `observability: {ui: lgtm}` (default 0.35.0)
-#   WITH_LGTM            1 = install the dev Grafana stack, 0 = never; default: only if app.yaml says `ui: lgtm`
+#   WITH_LGTM            1 = install the dev Grafana stack, 0 = never; default: only if system.yaml says `ui: lgtm`
 #   KYVERNO_VERSION      Kyverno chart version (default 3.9.1)
-#   WITH_KYVERNO         1 = install Kyverno, 0 = never; default: only if app.yaml has a `policies:` section
+#   WITH_KYVERNO         1 = install Kyverno, 0 = never; default: only if an environment's policy in system.yaml is not off
 #   CNPG_VERSION         CloudNativePG operator chart version (default 0.29.1)
-#   WITH_CNPG            1 = install CloudNativePG, 0 = never; default: only if app.yaml declares `addons.postgres`
+#   WITH_CNPG            1 = install CloudNativePG, 0 = never; default: only if system.yaml declares `resources.postgres`
 #   REGISTRY_PORT        also create a local image registry reachable as localhost:<port> from the host and as
 #                        k3d-<cluster>-registry:<port> from the cluster
 # Re-running `up` is safe; it re-applies credentials and the root Application.
@@ -55,15 +55,21 @@ with_cnpg="${WITH_CNPG:-auto}"
 kyverno_version="${KYVERNO_VERSION:-3.9.1}"
 with_kyverno="${WITH_KYVERNO:-auto}"
 if [ "$with_kyverno" = auto ]; then
-  if grep -qE '^policies:' applications/*/app.yaml 2>/dev/null; then with_kyverno=1; else with_kyverno=0; fi
+  # Kyverno when any environment's policy is not off (an environment without `policy:` gets audit/audit/enforce)
+  with_kyverno=$(awk '
+    /^environments:/ {inenv = 1; next}
+    /^[^ #]/ {inenv = 0}
+    inenv && /^  [A-Za-z0-9_-]+:/ {envs++}
+    inenv && /^    policy:[[:space:]]*["'"'"']?off["'"'"']?[[:space:]]*(#.*)?$/ {off++}
+    END {print (envs > 0 && off >= envs) ? 0 : 1}' applications/*/system.yaml 2>/dev/null || echo 0)
 fi
 lgtm_version="${LGTM_VERSION:-0.35.0}"
 with_lgtm="${WITH_LGTM:-auto}"
 if [ "$with_lgtm" = auto ]; then
-  if grep -qE '^[^#]*ui:[[:space:]]*lgtm' applications/*/app.yaml 2>/dev/null; then with_lgtm=1; else with_lgtm=0; fi
+  if grep -qE '^[^#]*ui:[[:space:]]*lgtm' applications/*/system.yaml 2>/dev/null; then with_lgtm=1; else with_lgtm=0; fi
 fi
 if [ "$with_cnpg" = auto ]; then
-  if grep -qE '^[[:space:]]+postgres:' applications/*/app.yaml 2>/dev/null; then with_cnpg=1; else with_cnpg=0; fi
+  if awk '/^resources:/ {r = 1; next} /^[^ #]/ {r = 0} r && /^  postgres:/ {f = 1} END {exit !f}' applications/*/system.yaml 2>/dev/null; then with_cnpg=1; else with_cnpg=0; fi
 fi
 registry="${name}-registry"
 org=$(sed -n 's/^github_org:[[:space:]]*//p' .copier-answers.yml | head -1)

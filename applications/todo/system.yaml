@@ -1,0 +1,89 @@
+# system.yaml of the todo system: the only hand-edited file of this system (sdlc-foundry 5.0).
+# Schema: https://github.com/ika100/sdlc-foundry/blob/main/docs/DOMAIN-MODEL.md#one-file-per-system
+# Written by `cplat platform update --migrate` from app.yaml and services.yaml; their comments were not carried over.
+system: todo
+owner: ika100
+gateway:
+  name: traefik-gateway
+  namespace: kube-system
+secretStore:
+  name: platform-secrets
+  kind: ClusterSecretStore
+environments:
+  dev:
+    host: '{component}.{system}-dev.localhost'
+    policy: 'off'
+  staging:
+    policy: 'off'
+  prod:
+    policy: 'off'
+components:
+  todo-api:
+    repo: ika100/todo-api
+    type: service
+    lang: python
+    image: ghcr.io/ika100/todo-api
+    port: 8080
+    probes:
+      liveness: /health
+      readiness: /ready
+    user: 10001
+    metrics: /metrics
+    volumes:
+      tmp: /tmp
+    env:
+      LOG_LEVEL: INFO
+    uses:
+    - postgres
+    secretRefs: []
+    replicas: 1
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    instances:
+      dev: {}
+  todo-web:
+    repo: ika100/todo-web
+    type: website
+    lang: typescript
+    image: ghcr.io/ika100/todo-web
+    port: 3000
+    probes:
+      liveness: /api/health
+      readiness: /api/ready
+    user: 1000
+    metrics: /api/metrics
+    volumes:
+      tmp: /tmp
+      next-cache: /app/.next/cache
+    env:
+      NODE_ENV: production
+      TODO_API_URL: http://todo-api
+    secretRefs: []
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 192Mi
+      limits:
+        cpu: 1000m
+        memory: 512Mi
+    expose:
+      host: todo-web
+    instances:
+      dev: {}
+resources:
+  postgres:
+    type: database
+    version: 17
+    instances:
+      dev:
+        replicas: 1
+        storage: 1Gi
+      prod:
+        replicas: 3
+        storage: 20Gi

@@ -5,7 +5,7 @@
 """Validate and manage multi-repo plans in docs/plan/ (ADR-011, amended by ADR-026).
 
 A plan is a Markdown file: a YAML front-matter block followed by a prose body. A plan made from a product spec
-names it (`spec: <spec_id>`, the file is docs/specs/<spec_id>/spec.md) and lists per repo the product criteria
+names it (`spec: <spec_id>`, the file is docs/specs/<spec_id>/spec.md) and lists per repo the system criteria
 (`acs: [AC-<NNN>.<n>]`) that repo implements; every active criterion of the spec must be assigned to a repo.
 Plans without `spec:` (written before ADR-026) stay valid and carry a free-text `arguments` prompt per repo.
 
@@ -90,46 +90,39 @@ def topo_levels(repos: list[dict]) -> list[list[str]]:
     return levels
 
 
-GITOPS_OPS = {"addon", "uses", "expose", "env"}
+GITOPS_OPS = {"addon", "resource", "uses", "expose", "env"}     # `resource` is the 5.0 word for `addon`
+KNOWN_RESOURCES = {"postgres"}
 
 
-def known_services() -> set[str]:
+def known_components() -> set[str]:
     names: set[str] = set()
-    for f in (ROOT / "applications").glob("*/services.yaml"):
-        names |= {s.get("name") for s in (yaml.safe_load(f.read_text()) or {}).get("services") or [] if isinstance(s, dict)}
+    for f in (ROOT / "applications").glob("*/system.yaml"):
+        comps = (yaml.safe_load(f.read_text()) or {}).get("components")
+        names |= set(comps) if isinstance(comps, dict) else set()
     return names
 
 
-def known_addons() -> set[str]:
-    """The keys of render.py's ADDONS table (the addon contract, ADR-020)."""
-    render = ROOT / "scripts" / "render.py"
-    if not render.is_file():
-        return {"postgres"}
-    block = render.read_text().split("ADDONS = {", 1)[-1]
-    return set(re.findall(r'^    "([a-z0-9-]+)": \{', block, re.M)) or {"postgres"}
-
-
-def check_gitops(rid: str, ops, services: set[str]) -> list[str]:
-    """Spec 045: the gitops-app entry lists operations /app:build runs with cplat addon / cplat compose set."""
+def check_gitops(rid: str, ops, components: set[str]) -> list[str]:
+    """Spec 045: the gitops-app entry lists operations /app:build runs with cplat resource / cplat component set."""
     if not isinstance(ops, list) or not ops:
-        return [f"repo {rid}: a gitops-app entry needs a `gitops:` list of operations (addon, uses, expose, env)"]
-    errs, addons = [], known_addons()
+        return [f"repo {rid}: a gitops-app entry needs a `gitops:` list of operations (resource, uses, expose, env)"]
+    errs, resources = [], KNOWN_RESOURCES
     for op in ops:
         kind = next((k for k in (op or {}) if k in GITOPS_OPS), None) if isinstance(op, dict) else None
         if kind is None:
             errs.append(f"repo {rid}: unknown gitops operation {op!r} (allowed: {', '.join(sorted(GITOPS_OPS))})")
             continue
-        if kind == "addon":
-            if op["addon"] not in addons:
-                errs.append(f"repo {rid}: unknown addon '{op['addon']}' (known: {', '.join(sorted(addons))})")
+        if kind in {"addon", "resource"}:
+            if op[kind] not in resources:
+                errs.append(f"repo {rid}: unknown resource '{op[kind]}' (known: {', '.join(sorted(resources))})")
             continue
-        target = op.get("service") if kind in {"uses", "env"} else op.get("expose")
+        target = (op.get("component") or op.get("service")) if kind in {"uses", "env"} else op.get("expose")
         if not target:
-            errs.append(f"repo {rid}: gitops operation {kind!r} needs a service")
-        elif target not in services:
-            errs.append(f"repo {rid}: unknown service '{target}' in gitops operation {kind!r}")
-        if kind == "uses" and op["uses"] not in addons:
-            errs.append(f"repo {rid}: unknown addon '{op['uses']}'")
+            errs.append(f"repo {rid}: gitops operation {kind!r} needs a component")
+        elif target not in components:
+            errs.append(f"repo {rid}: unknown component '{target}' in gitops operation {kind!r}")
+        if kind == "uses" and op["uses"] not in resources:
+            errs.append(f"repo {rid}: unknown resource '{op['uses']}'")
         if kind == "env" and not isinstance(op.get("env"), dict):
             errs.append(f"repo {rid}: gitops operation 'env' needs a mapping of variables")
     return errs
@@ -199,7 +192,7 @@ def check_all(path: Path) -> tuple[list[str], list[str]]:
         if not isinstance(r.get("done"), bool):
             errs.append(f"repo {rid}: done must be true/false")
         if r.get("shape") == "gitops-app":
-            late += check_gitops(rid, r.get("gitops"), known_services() | set(ids))
+            late += check_gitops(rid, r.get("gitops"), known_components() | set(ids))
     for p in meta.get("gitops_pin") or []:
         if p.get("service") not in ids:
             errs.append(f"gitops_pin: unknown service '{p.get('service')}'")
