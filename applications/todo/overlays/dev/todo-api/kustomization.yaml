@@ -5,4 +5,4 @@ resources:
 - service.yaml
 images:
 - name: ghcr.io/ika100/todo-api
-  newTag: sha-f7497120d8d5cd07ba1a85ee699b8dfb90910b96
+  newTag: sha-d7c4588783833cf34621b0575e3147c2a5ec6c71
