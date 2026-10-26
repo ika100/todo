@@ -1,0 +1,296 @@
+{
+  "title": "Claude Code usage",
+  "uid": "cplat-claude-code-usage",
+  "tags": [
+    "cplat",
+    "claude-code"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "refresh": "1m",
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Tokens per run",
+      "type": "bargauge",
+      "description": "Tokens of every type, by cplat run id, over the selected time range",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (cplat_run_id) (increase(claude_code_token_usage_tokens_total[$__range]))",
+          "legendFormat": "{{cplat_run_id}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Estimated cost per run (USD)",
+      "type": "bargauge",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (cplat_run_id) (increase(claude_code_cost_usage_USD_total[$__range]))",
+          "legendFormat": "{{cplat_run_id}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Tokens per model",
+      "type": "bargauge",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (model) (increase(claude_code_token_usage_tokens_total[$__range]))",
+          "legendFormat": "{{model}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Estimated cost per model (USD)",
+      "type": "bargauge",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (model) (increase(claude_code_cost_usage_USD_total[$__range]))",
+          "legendFormat": "{{model}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Tokens per day",
+      "type": "timeseries",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(increase(claude_code_token_usage_tokens_total[1d]))",
+          "legendFormat": "tokens",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Estimated cost per day (USD)",
+      "type": "timeseries",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(increase(claude_code_cost_usage_USD_total[1d]))",
+          "legendFormat": "cost",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Coordinator share of tokens",
+      "type": "stat",
+      "description": "The coordinator is the series without agent_name; subagents carry their agent type",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(increase(claude_code_token_usage_tokens_total{agent_name=\"\"}[$__range])) / sum(increase(claude_code_token_usage_tokens_total[$__range]))",
+          "legendFormat": "coordinator",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Coordinator share of cost",
+      "type": "stat",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(increase(claude_code_cost_usage_USD_total{agent_name=\"\"}[$__range])) / sum(increase(claude_code_cost_usage_USD_total[$__range]))",
+          "legendFormat": "coordinator",
+          "range": true
+        }
+      ]
+    }
+  ]
+}

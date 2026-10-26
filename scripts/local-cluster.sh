@@ -260,6 +260,18 @@ YAML
       echo "Installing the Grafana dev stack (otel-lgtm $lgtm_version): Grafana, Tempo, Loki, Prometheus in one pod (dev only)"
       # One shared stack in its own namespace: the all-in-one image runs as root, so it stays outside the application namespaces.
       k create namespace observability --dry-run=client -o yaml | k apply -f - >/dev/null
+      # Spec 101: the Claude Code usage dashboard. The image's own provider file lists three fixed files, so this adds a second
+      # provider (any *.yaml in its provisioning/dashboards dir is read) that points at the mounted dashboards folder.
+      # Source: grafana/docker-otel-lgtm docker/Dockerfile (provisioning dir /otel-lgtm/grafana/conf/provisioning/dashboards/).
+      dash=observability/dashboards/claude-code-usage.json
+      if [ -f "$dash" ]; then
+        k -n observability create configmap lgtm-cplat-dashboards --from-file=claude-code-usage.json="$dash" \
+          --from-literal=cplat-dashboards.yaml='{apiVersion: 1, providers: [{name: cplat, type: file, options: {path: /otel-lgtm/cplat-dashboards, foldersFromFilesStructure: false}}]}' \
+          --dry-run=client -o yaml | k apply -f - >/dev/null
+        dash_mounts=1
+      else
+        dash_mounts=0
+      fi
       k apply -f - >/dev/null <<YAML
 apiVersion: apps/v1
 kind: Deployment
@@ -276,6 +288,14 @@ spec:
           ports: [{name: grafana, containerPort: 3000}, {name: otlp-grpc, containerPort: 4317}, {name: otlp-http, containerPort: 4318}, {name: prometheus, containerPort: 9090}]
           readinessProbe: {httpGet: {path: /api/health, port: grafana}, initialDelaySeconds: 20, periodSeconds: 5}
           resources: {requests: {cpu: 200m, memory: 512Mi}, limits: {memory: 2Gi}}
+$([ "$dash_mounts" = 1 ] && cat <<'MOUNTS'
+          volumeMounts:
+            - {name: cplat-dashboards, mountPath: /otel-lgtm/cplat-dashboards/claude-code-usage.json, subPath: claude-code-usage.json}
+            - {name: cplat-dashboards, mountPath: /otel-lgtm/grafana/conf/provisioning/dashboards/cplat-dashboards.yaml, subPath: cplat-dashboards.yaml}
+      volumes:
+        - {name: cplat-dashboards, configMap: {name: lgtm-cplat-dashboards}}
+MOUNTS
+)
 ---
 apiVersion: v1
 kind: Service
