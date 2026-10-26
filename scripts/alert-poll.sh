@@ -19,7 +19,7 @@ else
   case "$ref" in v[0-9]*) [ -f "$dir/scripts/cplat/cplat.py" ] || fetch "$ref" ;; *) fetch "$ref" ;; esac
 fi
 if [ ! -f "$dir/scripts/cplat/alerts.py" ]; then
-  msg="alert poll: platform $ref has no alert poll (spec 092); run /shared:update-service"
+  msg="alert poll: platform $ref has no alert poll (spec 092); run /platform:update"
   echo "$msg"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then echo "$msg" >> "$GITHUB_STEP_SUMMARY"; fi
   exit 0

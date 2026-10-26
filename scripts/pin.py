@@ -2,16 +2,16 @@
 # /// script
 # dependencies = ["pyyaml"]
 # ///
-"""Pin a service's image in one environment (spec 062).
+"""Pin a component's image in one environment (spec 062).
 
-  uv run scripts/pin.py <env> <service> <tag>      e.g. dev todo-api sha-<40 hex>
+  uv run scripts/pin.py <env> <component> <tag>      e.g. dev todo-api sha-<40 hex>
 
-Sets `newTag` in applications/<app>/overlays/<env>/<service>/kustomization.yaml (and, for an external Helm service,
+Sets `newTag` in applications/<app>/overlays/<env>/<component>/kustomization.yaml (and, for an external Helm component,
 the image tag in its application.yaml, spec 069). Only immutable tags are accepted
-(`sha-<40 hex>` from a build of main, or `sha-<7>` from one before spec 078, or a release `X.Y.Z`), only for a composed service, and only in an environment
-the service runs in. render.py keeps the pin on every re-render. The pin-dev workflow runs this for every merge to a
-service's main. Staging is pinned by the pin-staging workflow after a green dev smoke (spec 093); prod only by
-`/gitops:promote`.
+(`sha-<40 hex>` from a build of main, or `sha-<7>` from one before spec 078, or a release `X.Y.Z`), only for a composed component, and only in an environment
+the component runs in (an instance in system.yaml); system.yaml is never changed. render.py keeps the pin on every re-render. The pin-dev workflow runs this for every merge to a
+component's main. Staging is pinned by the pin-staging workflow after a green dev smoke (spec 093); prod only by
+`/instance:promote`.
 """
 import re
 import sys
@@ -35,16 +35,17 @@ def main(argv: list[str]) -> int:
     env, name, tag = argv
     if not TAG.match(tag):
         return fail(f"'{tag}' is not an immutable tag (expected sha-<40 hex> or X.Y.Z)")
-    apps = sorted(p for p in (ROOT / "applications").iterdir() if (p / "services.yaml").is_file())
+    apps = sorted(p for p in (ROOT / "applications").iterdir() if (p / "system.yaml").is_file())
     if len(apps) != 1:
-        return fail(f"expected one application under applications/, found {len(apps)}")
+        return fail(f"expected one system under applications/, found {len(apps)}")
     app_dir = apps[0]
-    services = (yaml.safe_load((app_dir / "services.yaml").read_text()) or {}).get("services") or []
-    svc = next((s for s in services if s.get("name") == name), None)
-    if svc is None:
-        return fail(f"unknown service '{name}' (composed: {', '.join(s['name'] for s in services) or 'none'})")
-    if env not in (svc.get("environments") or ["dev"]):
-        return fail(f"service '{name}' does not run in {env} (environments: {', '.join(svc.get('environments') or ['dev'])})")
+    components = (yaml.safe_load((app_dir / "system.yaml").read_text()) or {}).get("components") or {}
+    svc = components.get(name)
+    if not isinstance(svc, dict):
+        return fail(f"unknown component '{name}' (composed: {', '.join(components) or 'none'})")
+    envs = list(svc.get("instances") or {}) or ["dev"]
+    if env not in envs:
+        return fail(f"component '{name}' does not run in {env} (instances: {', '.join(envs)})")
     path = app_dir / "overlays" / env / name / "kustomization.yaml"
     if not path.is_file():
         return fail(f"{path.relative_to(ROOT)} does not exist: run `devbox run render` first")

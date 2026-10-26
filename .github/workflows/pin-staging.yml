@@ -2,10 +2,10 @@ name: pin-staging
 
 # Spec 093 / ADR-041: a build of a service that passed its smoke tests in dev is promoted to staging. `cplat ship deploy`
 # sends `repository_dispatch` (event pin-staging, payload {service, tag, spec, smoke, record}) after the green dev smoke when
-# `promotion.staging` is `auto` (app.yaml, or on the service in services.yaml). This workflow is the twin of pin-dev.yml:
+# `environments.staging.promote: after-dev-smoke` (system.yaml, or on the instance of the component). This workflow is the twin of pin-dev.yml:
 # it pins the tag in staging on a branch, opens a PR, closes older automatic staging PRs of the service, runs ci.yml on the
 # branch (a reusable-workflow call) and merges the PR only when every check passed. A red CI leaves the PR open with a
-# comment, and staging keeps its old image. It can only pin staging: prod is promoted only by `/gitops:promote`.
+# comment, and staging keeps its old image. It can only pin staging: prod is promoted only by `/instance:promote`.
 run-name: pin-staging ${{ github.event.client_payload.service }} ${{ github.event.client_payload.tag }}   # ship deploy finds this run by name
 on:
   repository_dispatch:
