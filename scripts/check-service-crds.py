@@ -2,10 +2,10 @@
 # /// script
 # dependencies = ["pyyaml", "jsonschema"]
 # ///
-"""Validate the Components of this repo against the CRDs of the service ref named in the PR body (spec 098).
+"""Validate the Components of this repo against the CRDs of the component ref named in the PR body (spec 098).
 
-`/svc:ship` writes one line into its gitops PR: `Service-ref: <owner>/<repo>@<branch>`. CI runs this script on pull
-requests with the PR body and a read token (`SERVICE_REPOS_READ_TOKEN`). The script reads the CRDs of that service
+`/component:ship` writes one line into its gitops PR: `Service-ref: <owner>/<repo>@<branch>`. CI runs this script on pull
+requests with the PR body and a read token (`SERVICE_REPOS_READ_TOKEN`). The script reads the CRDs of that component
 branch through the GitHub REST API and validates every matching resource under applications/ against them.
 
 Inputs (environment): PR_BODY, SERVICE_REPOS_READ_TOKEN, GITHUB_API_URL (default https://api.github.com),
@@ -90,11 +90,12 @@ def load_yaml_file(path: Path) -> Any:
 
 
 def services_of(slug: str) -> list[dict]:
-    """Every services.yaml entry whose repo is `slug` (case-insensitive)."""
+    """Every system.yaml component whose repo is `slug` (case-insensitive)."""
     found, any_entry = [], False
-    for f in sorted((ROOT / "applications").glob("*/services.yaml")):
+    for f in sorted((ROOT / "applications").glob("*/system.yaml")):
         data = load_yaml_file(f)
-        for svc in (data.get("services") or []) if isinstance(data, dict) else []:
+        comps = data.get("components") if isinstance(data, dict) else None
+        for svc in (comps.values() if isinstance(comps, dict) else []):
             if isinstance(svc, dict) and isinstance(svc.get("repo"), str):
                 any_entry = True
                 if svc["repo"].lower() == slug.lower():
@@ -404,7 +405,7 @@ def run() -> int:
     slug = f"{owner}/{name}"
     services = services_of(slug)
     if not services:
-        raise Fail(f"ERROR: Service-ref names {slug}, which is not a service repo in applications/*/services.yaml; "
+        raise Fail(f"ERROR: Service-ref names {slug}, which is not a component repo in applications/*/system.yaml; "
                    "nothing was fetched")
     if not TOKEN:
         raise Fail(f"ERROR: Service-ref {slug}@{branch} needs the secret SERVICE_REPOS_READ_TOKEN to read {slug}; "

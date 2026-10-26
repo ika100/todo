@@ -11,8 +11,13 @@
     }
   },
   "enabledPlugins": {
-    "gitops@sdlc-foundry": true,
-    "app@sdlc-foundry": true,
+    "system@sdlc-foundry": true,
+    "component@sdlc-foundry": true,
+    "api@sdlc-foundry": true,
+    "resource@sdlc-foundry": true,
+    "instance@sdlc-foundry": true,
+    "issue@sdlc-foundry": true,
+    "platform@sdlc-foundry": true,
     "svc@sdlc-foundry": true,
     "shared@sdlc-foundry": true
   },
@@ -65,6 +70,8 @@
       "Bash(git push -u origin promote/*)",
       "Bash(git push -u origin compose/*)",
       "Bash(git push -u origin feature/*)",
+      "Bash(git push -u origin component/*)",
+      "Bash(git push -u origin resource/*)",
       "Bash(git push -u origin chore/*)",
       "Bash(git push -u origin docs/*)",
       "Bash(gh pr view *)",
