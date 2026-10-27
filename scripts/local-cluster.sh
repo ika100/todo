@@ -21,14 +21,29 @@
 #   PULL_TOKEN           token for the image pull secret: a classic PAT with only read:packages (default GH_TOKEN)
 #   WITH_ARGO=0          Gateway + namespaces only: no ArgoCD, no GitHub credentials, no root Application
 #                        (used by the platform's end-to-end test, which applies the rendered manifests directly)
+#   WITH_SYSTEM=0        cluster only (a cluster repo, no applications/): needs LOCAL_CLUSTER; `up` stops after Argo CD and its
+#                        credential, before the namespaces and bootstrap/ (default 1)
 #   ESO_VERSION          External Secrets Operator chart version (default 2.12.0)
 #   WITH_ESO=0           skip External Secrets Operator (no `secrets:` support in that cluster)
 #   LGTM_VERSION         grafana/otel-lgtm image tag for `observability: {ui: lgtm}` (default 0.35.0)
 #   WITH_LGTM            1 = install the dev Grafana stack, 0 = never; default: only if system.yaml says `ui: lgtm`
 #   KYVERNO_VERSION      Kyverno chart version (default 3.9.1)
 #   WITH_KYVERNO         1 = install Kyverno, 0 = never; default: only if an environment's policy in system.yaml is not off
-#   CNPG_VERSION         CloudNativePG operator chart version (default 0.29.1)
-#   WITH_CNPG            1 = install CloudNativePG, 0 = never; default: only if system.yaml declares `resources.postgres`
+#   CNPG_VERSION         CloudNativePG operator chart version (default: the targetRevision of operators/apps/cloudnative-pg.yaml, else 0.29.1)
+#   WITH_CNPG            1 = CloudNativePG, 0 = never; default: 1 exactly when operators/apps/cloudnative-pg.yaml exists.
+#                        With Argo CD the operator comes from operators/root.yaml (applied before bootstrap/); only with
+#                        WITH_ARGO=0 does this script install it through a k3s HelmChart.
+#   SEAWEEDFS_OPERATOR_VERSION  SeaweedFS operator chart version (default: the targetRevision of operators/apps/seaweedfs.yaml, else 0.1.45)
+#   WITH_SEAWEEDFS       1 = SeaweedFS operator, 0 = never; default: 1 exactly when operators/apps/seaweedfs.yaml exists.
+#                        Installed like CloudNativePG: from operators/root.yaml with Argo CD, a k3s HelmChart with WITH_ARGO=0.
+#   BARMAN_CLOUD_VERSION  Barman Cloud plugin chart version (default: the targetRevision of operators/apps/plugin-barman-cloud.yaml, else 0.8.1)
+#   CERT_MANAGER_VERSION  cert-manager chart version (default: the targetRevision of operators/apps/cert-manager.yaml, else v1.21.3)
+#   WITH_BARMAN_CLOUD    1 = Barman Cloud plugin (and cert-manager, which it needs), 0 = never; default: 1 exactly when
+#                        operators/apps/plugin-barman-cloud.yaml exists.
+#   VELERO_VERSION       Velero chart version (default: the targetRevision of operators/apps/velero.yaml, else 12.2.1)
+#   VELERO_AWS_PLUGIN_IMAGE  Velero AWS plugin image (default velero/velero-plugin-for-aws:v1.14.4)
+#   WITH_VELERO          1 = Velero, 0 = never; default: 1 exactly when operators/apps/velero.yaml exists.
+#                        All three are installed like CloudNativePG: from operators/root.yaml with Argo CD, k3s HelmCharts with WITH_ARGO=0.
 #   REGISTRY_PORT        also create a local image registry reachable as localhost:<port> from the host and as
 #                        k3d-<cluster>-registry:<port> from the cluster
 # Re-running `up` is safe; it re-applies credentials and the root Application.
@@ -38,7 +53,13 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=ports.sh
 . "$here/ports.sh"
 cd "$here/.."
-app=$(basename "$(find applications -mindepth 1 -maxdepth 1 -type d | sort | head -1)")
+with_system="${WITH_SYSTEM:-1}"
+if [ "$with_system" = 0 ]; then
+  app=""
+  if [ -z "${LOCAL_CLUSTER:-}" ]; then echo "ERROR: WITH_SYSTEM=0 needs LOCAL_CLUSTER" >&2; exit 2; fi
+else
+  app=$(basename "$(find applications -mindepth 1 -maxdepth 1 -type d | sort | head -1)")
+fi
 name="${LOCAL_CLUSTER:-$app-local}"
 ctx="k3d-$name"
 port="${LOCAL_HTTP_PORT:-default}"
@@ -50,10 +71,25 @@ with_argo="${WITH_ARGO:-1}"
 registry_port="${REGISTRY_PORT:-}"
 eso_version="${ESO_VERSION:-2.12.0}"
 with_eso="${WITH_ESO:-1}"
-cnpg_version="${CNPG_VERSION:-0.29.1}"
+cnpg_file=operators/apps/cloudnative-pg.yaml
+cnpg_default=0.29.1
+if [ -f "$cnpg_file" ]; then
+  cnpg_default=$(sed -n 's/^[[:space:]]*targetRevision:[[:space:]]*["'"'"']\{0,1\}\([^"'"'"'[:space:]]*\).*/\1/p' "$cnpg_file" | head -1)
+  cnpg_default="${cnpg_default:-0.29.1}"
+fi
+cnpg_version="${CNPG_VERSION:-$cnpg_default}"
 with_cnpg="${WITH_CNPG:-auto}"
+seaweedfs_file=operators/apps/seaweedfs.yaml
+seaweedfs_default=0.1.45
+if [ -f "$seaweedfs_file" ]; then
+  seaweedfs_default=$(sed -n 's/^[[:space:]]*targetRevision:[[:space:]]*["'"'"']\{0,1\}\([^"'"'"'[:space:]]*\).*/\1/p' "$seaweedfs_file" | head -1)
+  seaweedfs_default="${seaweedfs_default:-0.1.45}"
+fi
+seaweedfs_version="${SEAWEEDFS_OPERATOR_VERSION:-$seaweedfs_default}"
+with_seaweedfs="${WITH_SEAWEEDFS:-auto}"
 kyverno_version="${KYVERNO_VERSION:-3.9.1}"
 with_kyverno="${WITH_KYVERNO:-auto}"
+if [ "$with_kyverno" = auto ] && [ "$with_system" = 0 ]; then with_kyverno=0; fi
 if [ "$with_kyverno" = auto ]; then
   # Kyverno when any environment's policy is not off (an environment without `policy:` gets audit/audit/enforce)
   with_kyverno=$(awk '
@@ -65,11 +101,37 @@ if [ "$with_kyverno" = auto ]; then
 fi
 lgtm_version="${LGTM_VERSION:-0.35.0}"
 with_lgtm="${WITH_LGTM:-auto}"
+if [ "$with_lgtm" = auto ] && [ "$with_system" = 0 ]; then with_lgtm=0; fi
 if [ "$with_lgtm" = auto ]; then
   if grep -qE '^[^#]*ui:[[:space:]]*lgtm' applications/*/system.yaml 2>/dev/null; then with_lgtm=1; else with_lgtm=0; fi
 fi
 if [ "$with_cnpg" = auto ]; then
-  if awk '/^resources:/ {r = 1; next} /^[^ #]/ {r = 0} r && /^  postgres:/ {f = 1} END {exit !f}' applications/*/system.yaml 2>/dev/null; then with_cnpg=1; else with_cnpg=0; fi
+  if [ -f "$cnpg_file" ]; then with_cnpg=1; else with_cnpg=0; fi
+fi
+if [ "$with_seaweedfs" = auto ]; then
+  if [ -f "$seaweedfs_file" ]; then with_seaweedfs=1; else with_seaweedfs=0; fi
+fi
+rev_of() {   # rev_of <file> <fallback>: the targetRevision of an operators/apps file
+  local v=""
+  if [ -f "$1" ]; then
+    v=$(sed -n 's/^[[:space:]]*targetRevision:[[:space:]]*["'"'"']\{0,1\}\([^"'"'"'[:space:]]*\).*/\1/p' "$1" | head -1)
+  fi
+  echo "${v:-$2}"
+}
+barman_file=operators/apps/plugin-barman-cloud.yaml
+certmgr_file=operators/apps/cert-manager.yaml
+velero_file=operators/apps/velero.yaml
+barman_version="${BARMAN_CLOUD_VERSION:-$(rev_of "$barman_file" 0.8.1)}"
+certmgr_version="${CERT_MANAGER_VERSION:-$(rev_of "$certmgr_file" v1.21.3)}"
+velero_version="${VELERO_VERSION:-$(rev_of "$velero_file" 12.2.1)}"
+velero_aws_plugin_image="${VELERO_AWS_PLUGIN_IMAGE:-velero/velero-plugin-for-aws:v1.14.4}"
+with_barman="${WITH_BARMAN_CLOUD:-auto}"
+with_velero="${WITH_VELERO:-auto}"
+if [ "$with_barman" = auto ]; then
+  if [ -f "$barman_file" ]; then with_barman=1; else with_barman=0; fi
+fi
+if [ "$with_velero" = auto ]; then
+  if [ -f "$velero_file" ]; then with_velero=1; else with_velero=0; fi
 fi
 registry="${name}-registry"
 org=$(sed -n 's/^github_org:[[:space:]]*//p' .copier-answers.yml | head -1)
@@ -151,8 +213,8 @@ spec:
 YAML
     ready=0
     for _ in $(seq 1 60); do
-      if [ "$(k get gatewayclass traefik -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}' 2>/dev/null)" = "True" ] &&
-        [ "$(k -n kube-system get gateway traefik-gateway -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null)" = "True" ]; then ready=1; break; fi
+      if k wait --for=condition=Accepted gatewayclass/traefik --timeout=1s >/dev/null 2>&1 &&
+        k -n kube-system wait --for=condition=Programmed gateway/traefik-gateway --timeout=1s >/dev/null 2>&1; then ready=1; break; fi
       sleep 5
     done
     if [ "$ready" != 1 ]; then
@@ -242,7 +304,9 @@ YAML
       done
     fi
 
-    if [ "$with_cnpg" = 1 ]; then
+    if [ "$with_cnpg" = 1 ] && [ "$with_argo" = 1 ]; then
+      : # Argo CD installs the operator from operators/root.yaml (applied below, before bootstrap/)
+    elif [ "$with_cnpg" = 1 ]; then
       echo "Installing the CloudNativePG operator ($cnpg_version)"
       k apply -f - >/dev/null <<YAML
 apiVersion: helm.cattle.io/v1
@@ -260,6 +324,112 @@ YAML
       for _ in $(seq 1 60); do k get crd clusters.postgresql.cnpg.io >/dev/null 2>&1 && break; sleep 3; done
       for _ in $(seq 1 100); do k -n cnpg-system get deploy/cnpg-cloudnative-pg >/dev/null 2>&1 && break; sleep 3; done
       k -n cnpg-system rollout status deploy/cnpg-cloudnative-pg --timeout=300s >/dev/null
+    fi
+
+    if [ "$with_seaweedfs" = 1 ] && [ "$with_argo" = 1 ]; then
+      : # Argo CD installs the operator from operators/root.yaml (applied below, before bootstrap/)
+    elif [ "$with_seaweedfs" = 1 ]; then
+      echo "Installing the SeaweedFS operator ($seaweedfs_version)"
+      k apply -f - >/dev/null <<YAML
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: seaweedfs-operator
+  namespace: kube-system
+spec:
+  repo: https://seaweedfs.github.io/seaweedfs-operator
+  chart: seaweedfs-operator
+  version: ${seaweedfs_version}
+  targetNamespace: seaweedfs-operator
+  createNamespace: true
+YAML
+      for _ in $(seq 1 60); do k get crd buckets.seaweed.seaweedfs.com >/dev/null 2>&1 && break; sleep 3; done
+      for _ in $(seq 1 100); do [ -n "$(k -n seaweedfs-operator get deploy -l app.kubernetes.io/name=seaweedfs-operator -o name 2>/dev/null)" ] && break; sleep 3; done
+      k -n seaweedfs-operator rollout status deploy -l app.kubernetes.io/name=seaweedfs-operator --timeout=300s >/dev/null
+    fi
+
+    if [ "$with_barman" = 1 ] && [ "$with_argo" = 1 ]; then
+      : # Argo CD installs cert-manager and the plugin from operators/root.yaml (applied below, before bootstrap/)
+    elif [ "$with_barman" = 1 ]; then
+      echo "Installing cert-manager ($certmgr_version)"
+      k apply -f - >/dev/null <<YAML
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: cert-manager
+  namespace: kube-system
+spec:
+  repo: https://charts.jetstack.io
+  chart: cert-manager
+  version: ${certmgr_version}
+  targetNamespace: cert-manager
+  createNamespace: true
+  valuesContent: |-
+    crds:
+      enabled: true
+YAML
+      for _ in $(seq 1 60); do k get crd certificates.cert-manager.io >/dev/null 2>&1 && break; sleep 3; done
+      for d in cert-manager cert-manager-webhook cert-manager-cainjector; do
+        for _ in $(seq 1 100); do k -n cert-manager get "deploy/$d" >/dev/null 2>&1 && break; sleep 3; done
+        k -n cert-manager rollout status "deploy/$d" --timeout=300s >/dev/null
+      done
+      echo "Installing the Barman Cloud plugin ($barman_version)"
+      k apply -f - >/dev/null <<YAML
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: plugin-barman-cloud
+  namespace: kube-system
+spec:
+  repo: https://cloudnative-pg.github.io/charts
+  chart: plugin-barman-cloud
+  version: ${barman_version}
+  targetNamespace: cnpg-system
+  createNamespace: true
+YAML
+      for _ in $(seq 1 60); do k get crd objectstores.barmancloud.cnpg.io >/dev/null 2>&1 && break; sleep 3; done
+      for _ in $(seq 1 100); do [ -n "$(k -n cnpg-system get deploy -l app.kubernetes.io/name=plugin-barman-cloud -o name 2>/dev/null)" ] && break; sleep 3; done
+      k -n cnpg-system rollout status deploy -l app.kubernetes.io/name=plugin-barman-cloud --timeout=300s >/dev/null
+    fi
+
+    if [ "$with_velero" = 1 ] && [ "$with_argo" = 1 ]; then
+      : # Argo CD installs Velero from operators/root.yaml (applied below, before bootstrap/)
+    elif [ "$with_velero" = 1 ]; then
+      echo "Installing Velero ($velero_version)"
+      # valuesContent must match the velero values of OPERATORS in templates/gitops-app/scripts/render.py (the versions table)
+      k apply -f - >/dev/null <<YAML
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: velero
+  namespace: kube-system
+spec:
+  repo: https://vmware-tanzu.github.io/helm-charts
+  chart: velero
+  version: ${velero_version}
+  targetNamespace: velero
+  createNamespace: true
+  valuesContent: |-
+    initContainers:
+    - name: velero-plugin-for-aws
+      image: ${velero_aws_plugin_image}
+      volumeMounts:
+      - mountPath: /target
+        name: plugins
+    deployNodeAgent: true
+    snapshotsEnabled: false
+    credentials:
+      useSecret: false
+    configuration:
+      backupStorageLocation: []
+      volumeSnapshotLocation: []
+      uploaderType: kopia
+YAML
+      for _ in $(seq 1 60); do k get crd schedules.velero.io >/dev/null 2>&1 && break; sleep 3; done
+      for _ in $(seq 1 100); do k -n velero get deploy/velero >/dev/null 2>&1 && break; sleep 3; done
+      k -n velero rollout status deploy/velero --timeout=300s >/dev/null
+      for _ in $(seq 1 100); do k -n velero get daemonset/node-agent >/dev/null 2>&1 && break; sleep 3; done
+      k -n velero rollout status daemonset/node-agent --timeout=300s >/dev/null
     fi
 
     if [ "$with_lgtm" = 1 ]; then
@@ -340,6 +510,12 @@ YAML
       k -n argocd label secret github-creds argocd.argoproj.io/secret-type=repo-creds --overwrite >/dev/null
     fi
 
+    if [ "$with_system" = 0 ]; then   # a cluster repo: no system, no namespaces, no bootstrap/ (its cluster-up does those)
+      case "$port" in default | auto) port=$(docker port "k3d-${name}-serverlb" 80/tcp 2>/dev/null | head -1 | sed 's/.*://' || true) ;; esac
+      echo "Cluster ${ctx} is ready (no system: WITH_SYSTEM=0) on host port ${port}"
+      exit 0
+    fi
+
     # Namespaces are created up front so the GHCR pull secret exists before the first pod; Argo reuses them.
     for env in dev staging prod; do
       ns="${app}-${env}"
@@ -360,6 +536,47 @@ YAML
     if [ -n "$urls" ]; then urls="${urls}"$'\n'; fi   # command substitution strips the trailing newline
 
     if [ "$with_argo" = 1 ]; then
+      if { [ "$with_cnpg" = 1 ] || [ "$with_seaweedfs" = 1 ] || [ "$with_barman" = 1 ] || [ "$with_velero" = 1 ]; } && [ -f operators/root.yaml ]; then
+        legacy=0
+        if [ "$with_cnpg" = 1 ] && k -n kube-system get helmchart cnpg >/dev/null 2>&1; then
+          echo "CloudNativePG was installed by an older cluster-up (HelmChart kube-system/cnpg); keeping it. Recreate the cluster to let Argo CD manage it"
+          legacy=1
+        fi
+        if [ "$with_seaweedfs" = 1 ] && [ "$legacy" = 1 ]; then
+          echo "SeaweedFS (operators/apps/seaweedfs.yaml) is not installed either; recreate the cluster"
+        fi
+        if [ "$legacy" = 0 ]; then
+          echo "Applying the operators (operators/root.yaml)"
+          k apply -n argocd -f operators/root.yaml
+          if [ "$with_cnpg" = 1 ]; then
+            for _ in $(seq 1 200); do k get crd clusters.postgresql.cnpg.io >/dev/null 2>&1 && break; sleep 3; done
+            for _ in $(seq 1 100); do k -n cnpg-system get deploy/cnpg-cloudnative-pg >/dev/null 2>&1 && break; sleep 3; done
+            k -n cnpg-system rollout status deploy/cnpg-cloudnative-pg --timeout=300s >/dev/null
+          fi
+          if [ "$with_seaweedfs" = 1 ]; then
+            for _ in $(seq 1 200); do k get crd buckets.seaweed.seaweedfs.com >/dev/null 2>&1 && break; sleep 3; done
+            for _ in $(seq 1 100); do [ -n "$(k -n seaweedfs-operator get deploy -l app.kubernetes.io/name=seaweedfs-operator -o name 2>/dev/null)" ] && break; sleep 3; done
+            k -n seaweedfs-operator rollout status deploy -l app.kubernetes.io/name=seaweedfs-operator --timeout=300s >/dev/null
+          fi
+          if [ "$with_barman" = 1 ]; then
+            for _ in $(seq 1 200); do k get crd certificates.cert-manager.io >/dev/null 2>&1 && break; sleep 3; done
+            for d in cert-manager cert-manager-webhook cert-manager-cainjector; do
+              for _ in $(seq 1 100); do k -n cert-manager get "deploy/$d" >/dev/null 2>&1 && break; sleep 3; done
+              k -n cert-manager rollout status "deploy/$d" --timeout=300s >/dev/null
+            done
+            for _ in $(seq 1 200); do k get crd objectstores.barmancloud.cnpg.io >/dev/null 2>&1 && break; sleep 3; done
+            for _ in $(seq 1 100); do [ -n "$(k -n cnpg-system get deploy -l app.kubernetes.io/name=plugin-barman-cloud -o name 2>/dev/null)" ] && break; sleep 3; done
+            k -n cnpg-system rollout status deploy -l app.kubernetes.io/name=plugin-barman-cloud --timeout=300s >/dev/null
+          fi
+          if [ "$with_velero" = 1 ]; then
+            for _ in $(seq 1 200); do k get crd schedules.velero.io >/dev/null 2>&1 && break; sleep 3; done
+            for _ in $(seq 1 100); do k -n velero get deploy/velero >/dev/null 2>&1 && break; sleep 3; done
+            k -n velero rollout status deploy/velero --timeout=300s >/dev/null
+            for _ in $(seq 1 100); do k -n velero get daemonset/node-agent >/dev/null 2>&1 && break; sleep 3; done
+            k -n velero rollout status daemonset/node-agent --timeout=300s >/dev/null
+          fi
+        fi
+      fi
       echo "Applying the root Application"
       k apply -n argocd -f bootstrap/
       cat <<MSG
