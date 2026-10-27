@@ -16,7 +16,7 @@
   "shell": {
     "scripts": {
       "render": "uv run scripts/render.py",
-      "bootstrap": "[ -n \"$KUBE_CONTEXT\" ] || { echo 'Set KUBE_CONTEXT to the cluster to bootstrap, e.g. KUBE_CONTEXT=my-cluster devbox run bootstrap. Contexts:'; kubectl config get-contexts -o name; exit 1; }; echo \"Applying bootstrap/ to context $KUBE_CONTEXT\"; kubectl --context \"$KUBE_CONTEXT\" apply -n argocd -f bootstrap/",
+      "bootstrap": "bash scripts/bootstrap.sh",
       "cluster-up": "bash scripts/local-cluster.sh up",
       "cluster-down": "bash scripts/local-cluster.sh down",
       "cluster-ui": "bash scripts/local-cluster.sh ui",

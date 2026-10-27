@@ -13,10 +13,13 @@ environments:
   dev:
     host: '{component}.{system}-dev.localhost'
     policy: 'off'
+    operators: owner
   staging:
     policy: 'off'
+    operators: owner
   prod:
     policy: 'off'
+    operators: owner
 components:
   todo-api:
     repo: ika100/todo-api
