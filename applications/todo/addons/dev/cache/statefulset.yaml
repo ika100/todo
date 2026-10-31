@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: todo-cache
+  labels:
+    app.kubernetes.io/name: cache
+    app.kubernetes.io/part-of: todo
+    app.kubernetes.io/managed-by: gitops-app
+spec:
+  replicas: 1
+  serviceName: todo-cache
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cache
+      app.kubernetes.io/part-of: todo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cache
+        app.kubernetes.io/part-of: todo
+        app.kubernetes.io/managed-by: gitops-app
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: valkey
+        image: valkey/valkey:9.1.3@sha256:3add1a336a920ea54770a001ab6feb3da5fceea96a40373a3a2cd469b815f0b7
+        command:
+        - valkey-server
+        args:
+        - --port
+        - '6379'
+        - --requirepass
+        - $(VALKEY_PASSWORD)
+        - --maxmemory
+        - '214748364'
+        - --maxmemory-policy
+        - allkeys-lru
+        - --save
+        - ''
+        - --dir
+        - /data
+        - --appendonly
+        - 'no'
+        env:
+        - name: VALKEY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: todo-cache-app
+              key: password
+        ports:
+        - name: redis
+          containerPort: 6379
+        resources:
+          requests:
+            cpu: 50m
+            memory: 256Mi
+          limits:
+            memory: 256Mi
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - valkey-cli --no-auth-warning -a "$VALKEY_PASSWORD" ping | grep -q PONG
+          periodSeconds: 5
+        livenessProbe:
+          tcpSocket:
+            port: redis
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 999
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
