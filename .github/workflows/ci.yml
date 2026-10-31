@@ -45,6 +45,22 @@ jobs:
         run: devbox run service-crds
       - run: devbox run quality
 
+  upgrade-check:
+    name: upgrade-check (one environment per major)
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: jetify-com/devbox-install-action@8c6a66ed6273138b1915457069de78cb52fe3bd7 # v0.15.0
+        if: runner.environment == 'github-hosted'   # self-hosted runner images ship devbox (docs/self-hosted-runners.md)
+        with:
+          enable-cache: true
+      - run: devbox run upgrade-check
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+
   security:
     name: security (detect-secrets)
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}

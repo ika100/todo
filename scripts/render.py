@@ -9,6 +9,11 @@ The GitOps repo owns every manifest. applications/<system>/system.yaml is the on
   applications/<system>/overlays/<env>/<component>/            deployment.yaml, service.yaml, [httproute.yaml], kustomization.yaml
   applications/<system>/addons/<env>/<resource>/               cluster.yaml, kustomization.yaml (only where a running component `uses` the resource)
   applications/<system>/policies/<env>/                        policy.yaml, kustomization.yaml (Kyverno guard rails, unless `policy: off`)
+  applications/<system>/autonomy.json                         only when system.yaml declares autonomy (spec 124): what an engine reads
+  operators/                                                   Argo CD applications of the operators the system needs (versions table); with the answer
+                                                               property_operators: install (.copier-answers.yml, default owner) also External Secrets,
+                                                               Kyverno and LGTM (operators/apps/lgtm.yaml, operators/lgtm/); never for operators: owner
+  applications/<system>/addons/<env>/<db>/restore-state.yaml  written by `cplat resource restore`/`upgrade`: clusters and archives (server, major)
   bootstrap/<system>-root.yaml                                 root Argo Application (app-of-apps), applied once by a human
 
 A component only runs in the environments that are keys of its `instances` (none = dev), so a new component never reaches
@@ -38,6 +43,16 @@ system.yaml (every value explicit and reviewable; the model is described in docs
     staging:
       promote: after-dev-smoke       # after-dev-smoke | manual (default); dev takes none; prod is always promoted by hand
     prod: {}
+  autonomy: {paused: true}           # optional: every environment acts as observe (the only key; spec 124)
+  # environments.<env>.autonomy (optional; prod at most act; every omitted field has its default; changes no manifest):
+  #   level: act                       # observe (default) | advise | propose | act | improve
+  #   engine: https://ai-ops.example.com   # http(s) URL of the engine serving this environment
+  #   autoMerge: {routes: [fix], maxCriticality: low}                    # low | medium | high
+  #   riskGate: {maxFiles: 5, maxLines: 200, regressionTest: true, secondReview: true}
+  #   budget: {runsPerDay: 5, mergesPerDay: 2, perRun: {minutes: 60, invocations: 20, reruns: 2, cost: 3}}
+  #   window: {days: [mon, tue, wed, thu, fri], from: "09:00", to: "17:00", timezone: UTC}
+  #   undoWindow: 24h                  # <n>m | <n>h | <n>d
+  # components.<c>.instances.<env>.autonomy: {max: propose}   # caps the instance below its environment
   components:
     todo-api:
       type: service                  # service | website | library, required with lang
@@ -65,19 +80,42 @@ system.yaml (every value explicit and reviewable; the model is described in docs
         dev: {}
         staging: {promote: manual}
         prod: {replicas: 2, env: {LOG_LEVEL: WARN}}    # replicas, resources, env (merged), promote, secrets (replace declared fields by name)
+      # scale (spec 120): on the component (default for every instance) or on an instance; excludes `replicas` on the same level.
+      #   scale: {min: 2, max: 10, on: {cpu: 70}}                          # HPA on CPU utilisation percent (needs resources.requests.cpu)
+      #   scale: {max: 6, on: {memory: 80}}                                # HPA on memory utilisation percent; min defaults to 1
+      #   scale: {min: 0, max: 8, on: {consumes: orders, lag: 50}}         # KEDA on a broker's events API queue; min 0 = scale to zero
+      #   scale: {max: 5, on: {cache: sessions, list: jobs, length: 20}}   # KEDA on a Redis/Valkey list length
+      #   min and max are whole numbers, 1..20 (at most 20 replicas); min <= max; min: 0 only with a queue trigger (consumes, cache).
+      #   cpu/memory need a metrics server: answer resource_metrics (provided | install) in .copier-answers.yml; install renders it.
     todo-lib: {type: library, lang: python, repo: org/todo-lib}    # a library has no instances and renders nothing
   apis:
     todo-api-rest: {type: openapi}   # openapi | grpc | graphql | events; changes no manifest
-  resources:                         # any number, each named, typed (database, bucket; cache, broker come with specs 118-119)
+    orders: {type: events, broker: bus}   # spec 119: an events API is carried by a broker (optional key while there is one)
+  resources:                         # any number, each named, typed (database, bucket, cache, broker)
     orders-db:                       # name: lowercase letters, digits, hyphens; at most 30 characters; not a component name
       type: database                 # required
-      version: 17                    # 15 | 16 | 17 | 18 (default 17)
+      version: 17                    # 15 | 16 | 17 | 18 (default 17); instances.<env>.version sets one environment's major (spec 121)
       replicas: 1
       storage: 1Gi
       resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 512Mi}}
-      instances: {prod: {replicas: 3, storage: 20Gi,    # per-environment overrides: external, remote, replicas, storage, resources, backup
+      instances: {prod: {replicas: 3, storage: 20Gi,    # per-environment overrides: external, remote, replicas, storage, resources, backup, version (spec 121:
+                                     # the major of that environment, written by /resource:upgrade; held pins live in the rendered files)
                          backup: {to: backups, schedule: "30 2 * * *", retention: 8w}}}   # spec 117: to = a bucket resource; schedule is
                                      # a five-field cron in UTC (default "0 3 * * *"), retention <n>d or <n>w (default 30d)
+    sessions:                        # a cache (spec 118): one Valkey node per environment, REDIS_URL and REDIS_* for a using component
+      type: cache
+      version: 9                     # 8 | 9 (default 9)
+      memory: 256Mi                  # default 256Mi, a quantity of at least 64Mi; the server gets 80 % as maxmemory
+      maxmemoryPolicy: allkeys-lru   # default; noeviction | allkeys-lru | allkeys-lfu | allkeys-random | volatile-lru | volatile-lfu | ...
+      persistence: false             # true = append-only file on a volume (default false)
+      storage: 1Gi                   # only with persistence: true
+      instances: {prod: {memory: 1Gi, persistence: true, storage: 5Gi}}   # per environment: external, remote, memory, maxmemoryPolicy, persistence, storage, version
+    bus:                             # a broker (spec 119): NATS with JetStream; providers and consumers of its events APIs use it
+      type: broker                   # without listing it in `uses`; each gets NATS_* from <system>-bus-<component>-app
+      version: "2.15"                # "2.14" | "2.15" (default "2.15")
+      replicas: 1                    # 1 | 3 (default 1)
+      storage: 1Gi                   # JetStream volume per replica (default 1Gi)
+      instances: {prod: {replicas: 3, storage: 10Gi}}   # per environment: external, remote, replicas, storage, resources, version
     billing-db:                      # external: runs nothing, its connection Secret is synced from the secretStore
       type: database
       external: true                 # true | false (default false); per environment under instances.<env>.external
@@ -110,39 +148,68 @@ Usage:
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import re
 import shutil
 import sys
+from fractions import Fraction
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 ENVS = ["dev", "staging", "prod"]
 NOT_MIGRATED = "not migrated to 5.0: run `cplat platform update --migrate`"
-MANAGED_FILES = {"deployment.yaml", "service.yaml", "httproute.yaml", "kustomization.yaml", "password-generator.yaml", "application.yaml"}
-MANAGED_PREFIXES = ("externalsecret-",)
-TOP_KEYS = ["system", "owner", "environments", "components", "apis", "resources", "gateway", "secretStore", "registries"]
-ENV_KEYS = ["host", "url", "policy", "promote", "observability", "operators", "backup"]
+MANAGED_FILES = {"deployment.yaml", "service.yaml", "httproute.yaml", "kustomization.yaml", "password-generator.yaml", "application.yaml",
+                 "hpa.yaml", "scaledobject.yaml", "triggerauthentication.yaml"}
+MANAGED_PREFIXES = ("externalsecret-", "credentials-")
+TOP_KEYS = ["system", "owner", "environments", "components", "apis", "resources", "gateway", "secretStore", "registries", "autonomy"]
+ENV_KEYS = ["host", "url", "policy", "promote", "observability", "operators", "backup", "autonomy"]
 # Valid type/lang pairs (the languages of shapes.yml); service/unknown is what the migration writes for a 4.x entry without a known shape.
 VALID_PAIRS = [("service", "python"), ("service", "java"), ("service", "go"), ("website", "typescript"), ("library", "python"),
                ("service", "unknown")]
 PAIR_TEXT = ", ".join(f"{t}/{lang}" for t, lang in VALID_PAIRS if lang != "unknown")
 COMMON_KEYS = ["type", "lang", "repo"]
 SERVICE_KEYS = [*COMMON_KEYS, "image", "port", "probes", "user", "volumes", "env", "secretRefs", "secrets", "replicas", "resources",
-                "expose", "metrics", "provides", "consumes", "uses", "instances"]
+                "expose", "metrics", "provides", "consumes", "uses", "instances", "scale"]
 # Keys an external component may carry: its package owns ports, probes, secrets and exposure (spec 069).
 EXTERNAL_KEYS = [*COMMON_KEYS, "image", "external", "provides", "consumes", "instances"]
 LIBRARY_KEYS = [*COMMON_KEYS, "provides", "consumes"]
-INSTANCE_KEYS = ["replicas", "resources", "env", "promote", "secrets"]
+INSTANCE_KEYS = ["replicas", "resources", "env", "promote", "secrets", "autonomy", "scale"]
+SCALE_KEYS = ["min", "max", "on"]
+SCALE_MAX = 20
+ON_FORMS = "{cpu: <percent>}, {memory: <percent>}, {consumes: <api>, lag: <n>} or {cache: <resource>, list: <key>, length: <n>}"
+TRIGGER_FORMS = {"cpu": ["cpu"], "memory": ["memory"], "consumes": ["consumes", "lag"], "cache": ["cache", "list", "length"]}
+REQUEST_API_TYPES = ("openapi", "grpc", "graphql")
 RESOURCE_TYPES = ("database", "bucket", "cache", "broker")
-PLANNED_TYPES = {"cache": 118, "broker": 119}     # types no release runs yet: the spec that brings each
+PLANNED_TYPES: dict[str, int] = {}     # types no release runs yet: the spec that brings each (none since spec 119)
 RESOURCE_KEYS = ["type", "external", "remote", "version", "replicas", "storage", "resources", "instances"]
-RESOURCE_INSTANCE_KEYS = ["external", "remote", "replicas", "storage", "resources", "backup"]
+RESOURCE_INSTANCE_KEYS = ["external", "remote", "replicas", "storage", "resources", "backup", "version"]
 SIZING_KEYS = ["version", "replicas", "storage", "resources"]      # an external resource runs nothing: none of these
 BUCKET_KEYS = ["type", "external", "remote", "storage", "versioning", "instances"]
 BUCKET_INSTANCE_KEYS = ["external", "remote", "storage", "versioning"]
 BUCKET_SIZING_KEYS = ["storage", "versioning"]
+CACHE_KEYS = ["type", "external", "remote", "version", "memory", "maxmemoryPolicy", "persistence", "storage", "instances"]
+CACHE_INSTANCE_KEYS = ["external", "remote", "memory", "maxmemoryPolicy", "persistence", "storage", "version"]
+CACHE_SIZING_KEYS = ["version", "memory", "maxmemoryPolicy", "persistence", "storage"]
+CACHE_SUFFIXES = ("-app", "-password")     # the cluster objects a cache creates, next to `<system>-<name>` itself (design.md)
+CACHE_VERSIONS = (8, 9)
+BROKER_KEYS = ["type", "external", "remote", "version", "replicas", "storage", "resources", "instances"]
+BROKER_INSTANCE_KEYS = ["external", "remote", "replicas", "storage", "resources", "version"]
+BROKER_SIZING_KEYS = ["version", "replicas", "storage", "resources"]
+BROKER_VERSIONS = ("2.14", "2.15")
+BROKER_SUFFIXES = ("-headless", "-config", "-nack", "-password")    # the cluster objects a broker creates, next to `<system>-<name>` and the per-component Secrets
+BROKER_DEFAULT_RESOURCES = {"requests": {"cpu": "100m", "memory": "256Mi"}, "limits": {"memory": "512Mi"}}
+MAXMEMORY_POLICIES = ("noeviction", "allkeys-lru", "allkeys-lfu", "allkeys-random", "volatile-lru", "volatile-lfu", "volatile-random",
+                      "volatile-ttl")
+QUANTITY = re.compile(r"^([0-9]+(?:\.[0-9]+)?)(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$")     # a Kubernetes quantity without milli and exponent forms
+QUANTITY_FACTORS = {"": 1, "Ki": 1024, "Mi": 1024 ** 2, "Gi": 1024 ** 3, "Ti": 1024 ** 4, "Pi": 1024 ** 5, "Ei": 1024 ** 6,
+                    "k": 1000, "M": 1000 ** 2, "G": 1000 ** 3, "T": 1000 ** 4, "P": 1000 ** 5, "E": 1000 ** 6}
+CACHE_MEMORY_MIN = 64 * 1024 ** 2
+REDIS_TYPES = ("redis", "valkey")          # not resource types: the type is `cache`
 # The cluster objects an in-cluster bucket's SeaweedFS creates, next to `<system>-<name>` itself (design.md).
 BUCKET_SUFFIXES = ("-app", "-master", "-master-peer", "-volume", "-volume-0", "-volume-peer", "-filer", "-filer-peer", "-access-key",
                    "-secret-key")
@@ -169,49 +236,221 @@ TYPES = {
                "env": {"S3_ENDPOINT": "endpoint", "S3_BUCKET": "bucket", "S3_REGION": "region", "S3_FORCE_PATH_STYLE": "forcePathStyle",
                        "AWS_ACCESS_KEY_ID": "accessKeyId", "AWS_SECRET_ACCESS_KEY": "secretAccessKey", "AWS_REGION": "region",  # pragma: allowlist secret
                        "AWS_ENDPOINT_URL_S3": "endpoint"}},
+    "cache": {"keys": ["url", "host", "port", "password"],  # pragma: allowlist secret
+              "env": {"REDIS_URL": "url", "REDIS_HOST": "host", "REDIS_PORT": "port", "REDIS_PASSWORD": "password"}},  # pragma: allowlist secret
+    "broker": {"keys": ["url", "user", "password"],  # pragma: allowlist secret
+               "env": {"NATS_URL": "url", "NATS_USER": "user", "NATS_PASSWORD": "password"}},  # pragma: allowlist secret
 }
 API_TYPES = ["openapi", "grpc", "graphql", "events"]
 POLICY_VALUES = {"audit": "Audit", "enforce": "Enforce", "off": "Off"}     # system.yaml policy -> the 4.x mode
-# Pinned versions (ADR-058). Changing a pin follows spec 121. A database image is `ghcr.io/cloudnative-pg/postgresql:<major>.<minor>`
-# (optionally with an `@sha256:` digest); the operator row is the CloudNativePG chart and the operator version it installs.
+# The versions table (ADR-058, ADR-069, spec 121): every image and chart the renderer writes or the local cluster installs is a row of
+# `versions_table()` with an exact version; an image reference is `<repository>:<tag>@sha256:<digest>`. Changing a pin follows spec 121
+# and ADR-069 (CHANGELOG lists every changed row). A database image is CloudNativePG's `standard-trixie` build of a minor.
 POSTGRES_IMAGES = {
-    15: "ghcr.io/cloudnative-pg/postgresql:15.19",
-    16: "ghcr.io/cloudnative-pg/postgresql:16.15",
-    17: "ghcr.io/cloudnative-pg/postgresql:17.11",
-    18: "ghcr.io/cloudnative-pg/postgresql:18.6",
+    15: "ghcr.io/cloudnative-pg/postgresql:15.19-202610260819-standard-trixie@sha256:f617efc030d3099362e7fca616bb6d83d102599abf9b7b5e225482e4d0306aa3",
+    16: "ghcr.io/cloudnative-pg/postgresql:16.15-202610260820-standard-trixie@sha256:1ec419e997a8bde5263b6951f4c5ebc4aa2e1937927001f2561025c0a816e174",
+    17: "ghcr.io/cloudnative-pg/postgresql:17.11-202610260819-standard-trixie@sha256:ed6923f9ba2399cf9070379a353c710c29ced8a294be73986a2c3dae7e599ce3",
+    18: "ghcr.io/cloudnative-pg/postgresql:18.6-202610260820-standard-trixie@sha256:39add80f5b1e573e2f6b641c66fd1a2f8dede67ca0330e870285bc1078551390",
 }
-VELERO_AWS_PLUGIN_IMAGE = "velero/velero-plugin-for-aws:v1.14.4"     # matches the Velero chart's appVersion line (1.14 <-> 1.18)
-SEAWEEDFS_IMAGE = "chrislusf/seaweedfs:4.51"     # every in-cluster bucket runs its own SeaweedFS of this image
+VALKEY_IMAGES = {         # no bare major, no latest
+    8: "valkey/valkey:8.1.11@sha256:8f836008e0986c36adf50da714c7060cf689dbb335f61fe077939d90fa650809",
+    9: "valkey/valkey:9.1.3@sha256:3add1a336a920ea54770a001ab6feb3da5fceea96a40373a3a2cd469b815f0b7",
+}
+NATS_CHART = {"repo_url": "https://nats-io.github.io/k8s/helm/charts", "chart": "nats", "chart_version": "2.15.1"}   # per broker instance, not an operator
+NATS_IMAGES = {           # no bare minor, no latest
+    "2.14": "nats:2.14.9-alpine@sha256:127c5ccbc538a93f53ebb19461dc193130df386c2d6dab8199661a28a30d85bd",
+    "2.15": "nats:2.15.2-alpine@sha256:823e7f1d6d8ffe3b30dbd73d4a06bbb939acf94929f7fdf224404da7a05bafb5",
+}
+VELERO_AWS_PLUGIN_IMAGE = "velero/velero-plugin-for-aws:v1.14.4@sha256:c85a7fa803569e3128c33e4f5766f84ab156c8d171c9f1dd2715581d45ce98fa"   # matches the Velero chart's appVersion line (1.14 <-> 1.18)
+CREDENTIALS_IMAGE = "python:3.13.18-alpine3.24@sha256:7984cf56ceaddebe4fefeb75d64000b9f45d8b77b11a09b24524da6cdc3af0c8"   # runs the credentials Job (spec 128): stdlib python only
+SEAWEEDFS_IMAGE = "chrislusf/seaweedfs:4.51@sha256:f7a49e3f3972ebed5be2ed4befa4a0c68eb7bdddba6e692d42729ceb545134b8"     # every in-cluster bucket runs its own SeaweedFS of this image
+COLLECTOR_IMAGE = "otel/opentelemetry-collector-contrib:0.162.0@sha256:39923a8e431bd1f57be82411999d389fcfe40857492e4365456d97a4c1f74be6"
+LGTM_IMAGE = "grafana/otel-lgtm:0.35.0@sha256:2de1094c593c671cbfca878a28ffcd7e46ff5e32f2ce966c0cf33003f6cf4266"
+CLUSTER_PINS = {          # installed by local-cluster.sh, never rendered
+    "argo-cd": {"version": "v3.4.12", "manifest": "https://raw.githubusercontent.com/argoproj/argo-cd/v3.4.12/manifests/install.yaml"},
+    "k3s": {"image": "rancher/k3s:v1.32.5-k3s1@sha256:b75eac801bbc91b4584769c840f346683c7740d72f83e630088370f8e1eb2c8a"},
+    "gateway-api": {"version": "v1.2.1",
+                    "manifest": "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml"},
+}
+SUPPORTED_MAJORS = {"database": (16, 17, 18), "cache": (8, 9), "broker": ("2.14", "2.15")}   # upgrade targets
+DEPRECATED_MAJORS = {"database": (15,)}                                                       # render, upgrade from, never to
+UPGRADE_PATHS = {"database": {15: (16, 17, 18), 16: (17, 18), 17: (18,), 18: ()},
+                 "cache": {8: (9,), 9: ()}, "broker": {"2.14": ("2.15",), "2.15": ()}}
+# The CRDs of every operator chart version below and the versions each serves (`served: true` at the chart's default values), read from the
+# chart archives on 2026-10-28; the comment above each constant says where the chart keeps them (`crds/` is installed once by Helm and
+# never upgraded, `templates/` follows every upgrade).
+# cloudnative-pg: templates/crds/crds.yaml, gate crds.create (default true): installed by the chart, not from crds/
+_CRDS_CLOUDNATIVE_PG = {
+    "backups.postgresql.cnpg.io": ["v1"],
+    "clusterimagecatalogs.postgresql.cnpg.io": ["v1"],
+    "clusters.postgresql.cnpg.io": ["v1"],
+    "databaseroles.postgresql.cnpg.io": ["v1"],
+    "databases.postgresql.cnpg.io": ["v1"],
+    "failoverquorums.postgresql.cnpg.io": ["v1"],
+    "imagecatalogs.postgresql.cnpg.io": ["v1"],
+    "poolers.postgresql.cnpg.io": ["v1"],
+    "publications.postgresql.cnpg.io": ["v1"],
+    "scheduledbackups.postgresql.cnpg.io": ["v1"],
+    "subscriptions.postgresql.cnpg.io": ["v1"],
+}
+# seaweedfs: templates/crd-seaweed.yaml, gate crds.create (default true)
+_CRDS_SEAWEEDFS = {
+    "adminscripts.seaweed.seaweedfs.com": ["v1"],
+    "bucketlifecyclepolicies.seaweed.seaweedfs.com": ["v1"],
+    "bucketnotifications.seaweed.seaweedfs.com": ["v1"],
+    "buckets.seaweed.seaweedfs.com": ["v1"],
+    "resourcereferencegrants.seaweed.seaweedfs.com": ["v1"],
+    "s3credentials.seaweed.seaweedfs.com": ["v1"],
+    "s3identities.seaweed.seaweedfs.com": ["v1"],
+    "s3oidcproviders.seaweed.seaweedfs.com": ["v1"],
+    "s3policies.seaweed.seaweedfs.com": ["v1"],
+    "s3policybindings.seaweed.seaweedfs.com": ["v1"],
+    "seaweedbackups.seaweed.seaweedfs.com": ["v1"],
+    "seaweedcsidrivers.seaweed.seaweedfs.com": ["v1"],
+    "seaweedrestores.seaweed.seaweedfs.com": ["v1"],
+    "seaweeds.seaweed.seaweedfs.com": ["v1"],
+}
+# external-secrets: templates/crds/*.yaml, gates installCRDs and crds.create* (default true); v1beta1 is served only with crds.unsafeServeV1Beta1 (default false)
+_CRDS_EXTERNAL_SECRETS = {
+    "acraccesstokens.generators.external-secrets.io": ["v1alpha1"],
+    "beyondtrustworkloadcredentialsdynamicsecrets.generators.external-secrets.io": ["v1alpha1"],
+    "cloudsmithaccesstokens.generators.external-secrets.io": ["v1alpha1"],
+    "clusterexternalsecrets.external-secrets.io": ["v1"],
+    "clustergenerators.generators.external-secrets.io": ["v1alpha1"],
+    "clusterpushsecrets.external-secrets.io": ["v1alpha1"],
+    "clustersecretstores.external-secrets.io": ["v1"],
+    "ecrauthorizationtokens.generators.external-secrets.io": ["v1alpha1"],
+    "externalsecrets.external-secrets.io": ["v1"],
+    "fakes.generators.external-secrets.io": ["v1alpha1"],
+    "gcraccesstokens.generators.external-secrets.io": ["v1alpha1"],
+    "generatorstates.generators.external-secrets.io": ["v1alpha1"],
+    "githubaccesstokens.generators.external-secrets.io": ["v1alpha1"],
+    "gitlabdeploytokens.generators.external-secrets.io": ["v1alpha1"],
+    "grafanas.generators.external-secrets.io": ["v1alpha1"],
+    "mfas.generators.external-secrets.io": ["v1alpha1"],
+    "passwords.generators.external-secrets.io": ["v1alpha1"],
+    "pushsecrets.external-secrets.io": ["v1alpha1"],
+    "quayaccesstokens.generators.external-secrets.io": ["v1alpha1"],
+    "secretstores.external-secrets.io": ["v1"],
+    "sshkeys.generators.external-secrets.io": ["v1alpha1"],
+    "stssessiontokens.generators.external-secrets.io": ["v1alpha1"],
+    "uuids.generators.external-secrets.io": ["v1alpha1"],
+    "vaultdynamicsecrets.generators.external-secrets.io": ["v1alpha1"],
+    "webhooks.generators.external-secrets.io": ["v1alpha1"],
+}
+# kyverno: subcharts crds/ and kyverno-api templates, gate crds.install (default true); openreports CRDs need openreports.installCrds (default false); updaterequests v1beta1 is not served
+_CRDS_KYVERNO = {
+    "cleanuppolicies.kyverno.io": ["v2", "v2beta1"],
+    "clustercleanuppolicies.kyverno.io": ["v2", "v2beta1"],
+    "clusterpolicies.kyverno.io": ["v1", "v2beta1"],
+    "globalcontextentries.kyverno.io": ["v2", "v2alpha1", "v2beta1"],
+    "policies.kyverno.io": ["v1", "v2beta1"],
+    "policyexceptions.kyverno.io": ["v2", "v2beta1"],
+    "updaterequests.kyverno.io": ["v2"],
+    "clusterephemeralreports.reports.kyverno.io": ["v1"],
+    "ephemeralreports.reports.kyverno.io": ["v1"],
+    "clusterpolicyreports.wgpolicyk8s.io": ["v1alpha2"],
+    "policyreports.wgpolicyk8s.io": ["v1alpha2"],
+    "deletingpolicies.policies.kyverno.io": ["v1", "v1alpha1", "v1beta1"],
+    "generatingpolicies.policies.kyverno.io": ["v1", "v1alpha1", "v1beta1"],
+    "imagevalidatingpolicies.policies.kyverno.io": ["v1", "v1alpha1", "v1beta1"],
+    "mutatingpolicies.policies.kyverno.io": ["v1", "v1alpha1", "v1beta1"],
+    "namespaceddeletingpolicies.policies.kyverno.io": ["v1", "v1beta1"],
+    "namespacedgeneratingpolicies.policies.kyverno.io": ["v1", "v1beta1"],
+    "namespacedimagevalidatingpolicies.policies.kyverno.io": ["v1", "v1beta1"],
+    "namespacedmutatingpolicies.policies.kyverno.io": ["v1", "v1beta1"],
+    "namespacedvalidatingpolicies.policies.kyverno.io": ["v1", "v1beta1"],
+    "policyexceptions.policies.kyverno.io": ["v1", "v1alpha1", "v1beta1"],
+    "validatingpolicies.policies.kyverno.io": ["v1", "v1alpha1", "v1beta1"],
+}
+# plugin-barman-cloud: templates/crds/crds.yaml, gate crds.create (default true)
+_CRDS_PLUGIN_BARMAN_CLOUD = {
+    "objectstores.barmancloud.cnpg.io": ["v1"],
+}
+# cert-manager: templates/crd-*.yaml, gate crds.enabled (default false, set true in `values` below)
+_CRDS_CERT_MANAGER = {
+    "challenges.acme.cert-manager.io": ["v1"],
+    "orders.acme.cert-manager.io": ["v1"],
+    "certificaterequests.cert-manager.io": ["v1"],
+    "certificates.cert-manager.io": ["v1"],
+    "clusterissuers.cert-manager.io": ["v1"],
+    "issuers.cert-manager.io": ["v1"],
+}
+# velero: crds/ (Helm installs them once and never upgrades them)
+_CRDS_VELERO = {
+    "backuprepositories.velero.io": ["v1"],
+    "backups.velero.io": ["v1"],
+    "backupstoragelocations.velero.io": ["v1"],
+    "datadownloads.velero.io": ["v2alpha1"],
+    "datauploads.velero.io": ["v2alpha1"],
+    "deletebackuprequests.velero.io": ["v1"],
+    "downloadrequests.velero.io": ["v1"],
+    "podvolumebackups.velero.io": ["v1"],
+    "podvolumerestores.velero.io": ["v1"],
+    "restores.velero.io": ["v1"],
+    "schedules.velero.io": ["v1"],
+    "serverstatusrequests.velero.io": ["v1"],
+    "volumesnapshotlocations.velero.io": ["v1"],
+}
+# nack: crds/crds.yml (Helm installs them once and never upgrades them); v1beta1 is not served
+_CRDS_NACK = {
+    "streams.jetstream.nats.io": ["v1beta2"],   # streamtemplates.jetstream.nats.io is installed but serves no version (v1beta1 served: false), so it has no entry
+    "consumers.jetstream.nats.io": ["v1beta2"],
+    "accounts.jetstream.nats.io": ["v1beta2"],
+    "keyvalues.jetstream.nats.io": ["v1beta2"],
+    "objectstores.jetstream.nats.io": ["v1beta2"],
+}
+# keda: templates/crds/*.yaml, gate crds.install (default true)
+_CRDS_KEDA = {
+    "cloudeventsources.eventing.keda.sh": ["v1alpha1"],
+    "clustercloudeventsources.eventing.keda.sh": ["v1alpha1"],
+    "clustertriggerauthentications.keda.sh": ["v1alpha1"],
+    "scaledjobs.keda.sh": ["v1alpha1"],
+    "scaledobjects.keda.sh": ["v1alpha1"],
+    "triggerauthentications.keda.sh": ["v1alpha1"],
+}
+
 OPERATORS = {
     "cloudnative-pg": {"repo_url": "https://cloudnative-pg.github.io/charts", "chart": "cloudnative-pg", "chart_version": "0.29.1",
-                       "operator_version": "1.30.1", "namespace": "cnpg-system", "release": "cnpg", "crd": "clusters.postgresql.cnpg.io"},
+                       "operator_version": "1.30.1", "namespace": "cnpg-system", "release": "cnpg", "crd": "clusters.postgresql.cnpg.io", "crds": _CRDS_CLOUDNATIVE_PG},
     "seaweedfs": {"repo_url": "https://seaweedfs.github.io/seaweedfs-operator", "chart": "seaweedfs-operator", "chart_version": "0.1.45",
                   "operator_version": "1.0.42", "namespace": "seaweedfs-operator", "release": "seaweedfs-operator",
-                  "crd": "buckets.seaweed.seaweedfs.com"},
+                  "crd": "buckets.seaweed.seaweedfs.com", "crds": _CRDS_SEAWEEDFS},
     # `selector` (optional, default `app.kubernetes.io/name=<chart>`): the operator Deployment whose image tag is the version; used by doctor.
     "external-secrets": {"repo_url": "https://charts.external-secrets.io", "chart": "external-secrets", "chart_version": "2.12.0",
                          "operator_version": "2.12.0", "namespace": "external-secrets", "release": "external-secrets",
-                         "crd": "clustersecretstores.external-secrets.io"},
+                         "crd": "clustersecretstores.external-secrets.io", "crds": _CRDS_EXTERNAL_SECRETS},
     "kyverno": {"repo_url": "https://kyverno.github.io/kyverno", "chart": "kyverno", "chart_version": "3.9.1",
                 "operator_version": "1.19.1", "namespace": "kyverno", "release": "kyverno",
-                "crd": "namespacedvalidatingpolicies.policies.kyverno.io",
+                "crd": "namespacedvalidatingpolicies.policies.kyverno.io", "crds": _CRDS_KYVERNO,
                 "selector": "app.kubernetes.io/component=admission-controller,app.kubernetes.io/instance=kyverno"},
     # Spec 117: the Barman Cloud plugin (and its hard requirement cert-manager) for database backups, Velero for environment backups.
     "plugin-barman-cloud": {"repo_url": "https://cloudnative-pg.github.io/charts", "chart": "plugin-barman-cloud", "chart_version": "0.8.1",
                             "operator_version": "0.15.1", "namespace": "cnpg-system", "release": "barman-cloud",
-                            "crd": "objectstores.barmancloud.cnpg.io", "retry": True},
+                            "crd": "objectstores.barmancloud.cnpg.io", "crds": _CRDS_PLUGIN_BARMAN_CLOUD, "retry": True},
     "cert-manager": {"repo_url": "https://charts.jetstack.io", "chart": "cert-manager", "chart_version": "v1.21.3",
                      "operator_version": "1.21.3", "namespace": "cert-manager", "release": "cert-manager",
-                     "crd": "certificates.cert-manager.io", "values": {"crds": {"enabled": True}}},
+                     "crd": "certificates.cert-manager.io", "crds": _CRDS_CERT_MANAGER, "values": {"crds": {"enabled": True}}},
     "velero": {"repo_url": "https://vmware-tanzu.github.io/helm-charts", "chart": "velero", "chart_version": "12.2.1",
-               "operator_version": "1.18.2", "namespace": "velero", "release": "velero", "crd": "schedules.velero.io", "finalizer": True,
+               "operator_version": "1.18.2", "namespace": "velero", "release": "velero", "crd": "schedules.velero.io", "crds": _CRDS_VELERO, "finalizer": True,
                "values": {"initContainers": [{"name": "velero-plugin-for-aws", "image": VELERO_AWS_PLUGIN_IMAGE,
                                               "volumeMounts": [{"mountPath": "/target", "name": "plugins"}]}],
                           "deployNodeAgent": True, "snapshotsEnabled": False, "credentials": {"useSecret": False},
                           "configuration": {"backupStorageLocation": [], "volumeSnapshotLocation": [], "uploaderType": "kopia"}}},
+    # Spec 119: the NATS JetStream controller (NACK) reconciles the Account, Stream and Consumer objects of in-cluster brokers.
+    "nack": {"repo_url": "https://nats-io.github.io/k8s/helm/charts", "chart": "nack", "chart_version": "0.35.0",
+             "operator_version": "0.24.0", "namespace": "nack", "release": "nack", "crd": "streams.jetstream.nats.io", "crds": _CRDS_NACK,
+             "selector": "app=nack"},   # the chart's useLegacyNames (default true) labels the Deployment app: <release>
+    # Spec 120: KEDA scales queue-triggered instances; metrics-server serves cpu/memory to the HPA when the cluster lacks one.
+    "keda": {"repo_url": "https://kedacore.github.io/charts", "chart": "keda", "chart_version": "2.19.0",
+             "operator_version": "2.19.0", "namespace": "keda", "release": "keda", "crd": "scaledobjects.keda.sh", "crds": _CRDS_KEDA,
+             "selector": "app.kubernetes.io/name=keda-operator"},   # the chart names the Deployment keda-operator; the default label would match nothing
+    "metrics-server": {"repo_url": "https://kubernetes-sigs.github.io/metrics-server", "chart": "metrics-server",
+                       "chart_version": "3.14.0", "operator_version": "0.9.0", "namespace": "kube-system",
+                       "release": "metrics-server", "crd": None, "crds": {}, "selector": "app.kubernetes.io/name=metrics-server"},
 }
 OPERATOR_RETRY = {"limit": 10, "backoff": {"duration": "30s", "factor": 2, "maxDuration": "10m"}}
-OPERATOR_OF_TYPE = {"database": "cloudnative-pg", "bucket": "seaweedfs"}
+OPERATOR_OF_TYPE = {"database": "cloudnative-pg", "bucket": "seaweedfs", "broker": "nack"}
 DB_DEFAULT_RESOURCES = {"requests": {"cpu": "100m", "memory": "256Mi"}, "limits": {"memory": "512Mi"}}
 # Resource contract (ADR-020, ADR-057): what a component gets when it `uses` a resource is in TYPES. Components never see the implementation.
 ADDONS = {
@@ -220,10 +459,24 @@ ADDONS = {
     "observability": {
         "scope": "all",
         "prune": True,                      # configuration only: removing it removes the collector (a database keeps its data)
-        "image": "otel/opentelemetry-collector-contrib:0.162.0",
+        "image": COLLECTOR_IMAGE,
         "defaults": {"ui": "none"},
     },
 }
+LEVELS = ["observe", "advise", "propose", "act", "improve"]      # autonomy levels (spec 124); each includes the ones before
+LEVEL_CAP = {"dev": "improve", "staging": "improve", "prod": "act"}
+AUTONOMY_KEYS = ["level", "autoMerge", "riskGate", "budget", "window", "undoWindow", "engine"]
+AUTONOMY_DEFAULTS = {
+    "autoMerge": {"routes": ["fix"], "maxCriticality": "low"},
+    "riskGate": {"maxFiles": 5, "maxLines": 200, "regressionTest": True, "secondReview": True},
+    "budget": {"runsPerDay": 5, "mergesPerDay": 2, "perRun": {"minutes": 60, "invocations": 20, "reruns": 2, "cost": 3}},
+    "window": {"days": ["mon", "tue", "wed", "thu", "fri"], "from": "09:00", "to": "17:00", "timezone": "UTC"},
+    "undoWindow": "24h",
+}
+WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+CRITICALITIES = ["low", "medium", "high"]
+DURATION = re.compile(r"^([1-9][0-9]{0,3})[mhd]$")
+HHMM = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 POLICY_API = "policies.kyverno.io/v1"
 POLICY_MODES = {"Audit": "Audit", "Enforce": "Deny"}     # mode -> Kyverno validationActions
 LGTM_ENDPOINT = "http://lgtm.observability.svc:4318"    # the shared all-in-one UI stack `cluster-up` installs for `ui: lgtm`
@@ -238,7 +491,9 @@ SECRET_NAME = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 LITERAL_SECRET = re.compile(r"(PASSWORD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY|CREDENTIAL)", re.I)
 ALERT_SEVERITIES = ("critical", "warning", "info")
+BROKER_ENV_NAMES = ("NATS_PASSWORD",)     # secret-looking names a broker provides: their clash text wins over the literal-secret text
 DNS_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+EVENTS_API_NAME = DNS_LABEL     # a bound events API names a stream, a subject token and an object
 
 
 class RenderError(Exception):
@@ -291,6 +546,138 @@ def check_promote(where: str, env: str, value) -> None:
         fail(f"{where} must be after-dev-smoke or manual, got '{value}'")
     if env == "prod" and value != "manual":
         fail(f"{where}: prod is always promoted by hand (manual), got '{value}'")
+
+
+def check_level(where: str, value) -> None:
+    if not isinstance(value, str) or value not in LEVELS:
+        fail(f"{where} must be one of {', '.join(LEVELS)}, got '{value}'")
+
+
+def check_keys(where: str, block, allowed: list[str]) -> dict:
+    if not isinstance(block, dict):
+        fail(f"{where} must be a mapping")
+    for k in block:
+        if k not in allowed:
+            fail(f"{where}: unknown key '{k}' (allowed: {', '.join(allowed)})")
+    return block
+
+
+def check_int(where: str, value, low: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < low:
+        fail(f"{where} must be a whole number of at least {low}, got '{value}'")
+
+
+def check_flag(where: str, value) -> None:
+    if not isinstance(value, bool):
+        fail(f"{where} must be true or false, got '{value}'")
+
+
+def clock(where: str, value) -> str:
+    """`"HH:MM"`; YAML 1.1 reads an unquoted `17:00` as the number 1020 (minutes), which is accepted as that time."""
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 1440:
+        return f"{value // 60:02d}:{value % 60:02d}"
+    if not isinstance(value, str) or not HHMM.match(value):
+        fail(f'{where} must be "HH:MM", got \'{value}\'')
+    return value
+
+
+def validate_window(where: str, block) -> dict:
+    block = check_keys(where, block, list(AUTONOMY_DEFAULTS["window"]))
+    win = {**AUTONOMY_DEFAULTS["window"], **block}
+    days = win["days"]
+    if (not isinstance(days, list) or not days or len(set(map(str, days))) != len(days)
+            or any(not isinstance(d, str) or d not in WEEKDAYS for d in days)):
+        fail(f"{where}.days must be a non-empty list of {', '.join(WEEKDAYS)} without duplicates, got '{days}'")
+    win["from"], win["to"] = clock(f"{where}.from", win["from"]), clock(f"{where}.to", win["to"])
+    if win["from"] == win["to"]:
+        fail(f"{where}: from and to must differ, got '{win['from']}' twice")
+    tz = win["timezone"]
+    try:
+        if not isinstance(tz, str) or not tz or tz.startswith("/") or ".." in tz:
+            raise ValueError(tz)
+        ZoneInfo(tz)
+    except (ValueError, ZoneInfoNotFoundError, OSError):
+        fail(f"{where}.timezone must be an IANA time zone like Europe/Berlin, got '{tz}'")
+    return win
+
+
+def validate_autonomy(env: str, block) -> dict:
+    """`environments.<env>.autonomy` (spec 124): the declared level, engine and guardrails, every omitted field at its default."""
+    where = f"environments.{env}.autonomy"
+    block = check_keys(where, {} if block is None else block, AUTONOMY_KEYS)
+    level = block.get("level", "observe")
+    check_level(f"{where}.level", level)
+    if level == "improve" and LEVEL_CAP[env] == "act":
+        fail(f"{where}.level: act is the highest level allowed in {env}, got '{level}'")
+    engine = block.get("engine")
+    if "engine" in block and (not isinstance(engine, str) or not re.match(r"^https?://[^\s/]+\S*$", engine)):
+        fail(f"{where}.engine must be an http(s) URL, got '{engine}'")
+    merge = check_keys(f"{where}.autoMerge", block.get("autoMerge", {}), list(AUTONOMY_DEFAULTS["autoMerge"]))
+    routes = merge.get("routes", ["fix"])
+    if not isinstance(routes, list):
+        fail(f"{where}.autoMerge.routes must be a list (allowed: fix)")
+    for r in routes:
+        if r == "spec":
+            fail(f"{where}.autoMerge.routes: spec is refused: a spec always needs a person's approval (allowed: fix)")
+        if r != "fix":
+            fail(f"{where}.autoMerge.routes: '{r}' is not a route (allowed: fix)")
+    crit = merge.get("maxCriticality", "low")
+    if crit not in CRITICALITIES:
+        fail(f"{where}.autoMerge.maxCriticality must be one of {', '.join(CRITICALITIES)}, got '{crit}'")
+    risk = check_keys(f"{where}.riskGate", block.get("riskGate", {}), list(AUTONOMY_DEFAULTS["riskGate"]))
+    for k in ("maxFiles", "maxLines"):
+        if k in risk:
+            check_int(f"{where}.riskGate.{k}", risk[k], 1)
+    for k in ("regressionTest", "secondReview"):
+        if k in risk:
+            check_flag(f"{where}.riskGate.{k}", risk[k])
+    budget = check_keys(f"{where}.budget", block.get("budget", {}), list(AUTONOMY_DEFAULTS["budget"]))
+    for k in ("runsPerDay", "mergesPerDay"):
+        if k in budget:
+            check_int(f"{where}.budget.{k}", budget[k], 0)
+    per_run = check_keys(f"{where}.budget.perRun", budget.get("perRun", {}), list(AUTONOMY_DEFAULTS["budget"]["perRun"]))
+    for k, v in per_run.items():
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+            fail(f"{where}.budget.perRun.{k} must be a number above 0, got '{v}'")
+    undo = block.get("undoWindow", "24h")
+    if not isinstance(undo, str) or not DURATION.match(undo):
+        fail(f"{where}.undoWindow must be a duration like 24h, 90m or 2d, got '{undo}'")
+    d = AUTONOMY_DEFAULTS
+    return {"declared": level, "engine": engine,
+            "autoMerge": {**d["autoMerge"], **merge, "routes": list(routes), "maxCriticality": crit},
+            "riskGate": {**d["riskGate"], **risk},
+            "budget": {**d["budget"], **budget, "perRun": {**d["budget"]["perRun"], **per_run}},
+            "window": validate_window(f"{where}.window", block.get("window", {})), "undoWindow": undo}
+
+
+def validate_pause(doc: dict) -> bool:
+    """The top-level `autonomy: {paused: true}`."""
+    block = check_keys("autonomy", {} if doc.get("autonomy") is None else doc["autonomy"], ["paused"])
+    if "paused" in block and not isinstance(block["paused"], bool):
+        fail("autonomy.paused must be true or false")
+    return block.get("paused", False)
+
+
+def lower_level(a: str, b: str) -> str:
+    return a if LEVELS.index(a) <= LEVELS.index(b) else b
+
+
+def autonomy_json(system: str, paused: bool, envs: dict, promote: dict, services: list[dict]) -> str:
+    """The rendered `autonomy.json` an engine reads (equal to the autonomy part of `cplat model show --json`)."""
+    out_envs: dict[str, dict] = {}
+    for e in ENVS:
+        declared = envs[e]["declared"]
+        effective = "observe" if paused else "act" if declared == "improve" else declared
+        out_envs[e] = {**envs[e], "effective": effective, "cap": LEVEL_CAP[e], "paused": paused,
+                       "promotion": "main" if e == "dev" else promote.get(e, "manual")}
+    instances = {}
+    for s in services:
+        for e in s["environments"]:
+            top = s["_eff"][e].get("autonomy_max")
+            eff = out_envs[e]["effective"]
+            instances[f"{s['name']}/{e}"] = {"max": top, "effective": eff if top is None else lower_level(eff, top)}
+    doc = {"schema": 1, "system": system, "paused": paused, "levels": LEVELS, "environments": out_envs, "instances": instances}
+    return json.dumps(doc, indent=2, sort_keys=True) + "\n"
 
 
 def validate_alerts(obs: dict, where: str) -> None:
@@ -356,7 +743,7 @@ def validate_environments(doc: dict) -> tuple[dict, dict]:
     if names != ENVS:
         fail(f"environments must be dev, staging, prod in this order (the promotion order), got {', '.join(map(str, names)) or 'none'}")
     hosts: dict[str, str] = {}
-    conf: dict = {"policy": {}, "observability": {}, "operators": {}, "backup": {}}
+    conf: dict = {"policy": {}, "observability": {}, "operators": {}, "backup": {}, "autonomy": {}, "promote": {}, "declared": False}
     for e in ENVS:
         c = envs[e] if envs[e] is not None else {}
         if not isinstance(c, dict):
@@ -386,6 +773,10 @@ def validate_environments(doc: dict) -> tuple[dict, dict]:
             conf["operators"][e] = "owner"
         if "backup" in c:
             conf["backup"][e] = c["backup"]       # checked by validate_backups, once the resources are known
+        conf["autonomy"][e] = validate_autonomy(e, c.get("autonomy"))
+        conf["declared"] = conf["declared"] or "autonomy" in c
+        if "promote" in c:
+            conf["promote"][e] = c["promote"]
     return hosts, conf
 
 
@@ -411,10 +802,12 @@ def validate_secrets(label: str, secrets: list) -> None:
             check_placeholders(f"{label}.secrets.{sn}.remote.path", sec["remote"]["path"], ["system", "env", "secret", "component"])
 
 
-def validate_env_vars(label: str, env) -> None:
+def validate_env_vars(label: str, env, defer: bool = True) -> None:
     if env is not None and not isinstance(env, dict):
         fail(f"{label}: env must be a mapping of names to values")
     for k, v in (env or {}).items():
+        if k in BROKER_ENV_NAMES and defer:      # validate_uses reports a clash with a broker first, else checks it then
+            continue
         if LITERAL_SECRET.search(k) and str(v).strip():
             fail(f"{label}: env {k} looks like a secret; values in system.yaml are committed to git. "
                  f"Declare it under `secrets:` (generate: [{k}] or remote: {{keys: [{k}]}}) instead")
@@ -455,7 +848,71 @@ def str_list(label: str, key: str, value) -> list[str]:
     return value
 
 
-def validate_instances(c: str, spec: dict, external: bool) -> dict:
+def is_int(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def yaml_text(v) -> str:
+    return yaml.safe_dump(v, default_flow_style=True).strip().removesuffix("\n...").removesuffix("...").strip()
+
+
+def scale_on_keys(doc: dict) -> None:
+    """YAML 1.1 reads an unquoted `on:` as the boolean true; inside a `scale` mapping that key is `on` (as `off` is for a policy)."""
+    comps = doc.get("components")
+    for c in (comps.values() if isinstance(comps, dict) else []):      # a malformed tree fails later with 114's own message
+        if not isinstance(c, dict):
+            continue
+        insts = c.get("instances")
+        for holder in [c, *[i for i in (insts.values() if isinstance(insts, dict) else []) if isinstance(i, dict)]]:
+            s = holder.get("scale")
+            if isinstance(s, dict) and True in s and "on" not in s:
+                holder["scale"] = {("on" if k is True else k): v for k, v in s.items()}
+
+
+def check_scale(at: str, scale) -> dict:
+    """One `scale` mapping (design.md, Render errors); returns {min, max, trigger, on}."""
+    where = f"{at}.scale"
+    if not isinstance(scale, dict):
+        fail(f"{where} must be a mapping with min, max and on, e.g. {{min: 1, max: 5, on: {{cpu: 70}}}}")
+    for k in scale:
+        if k not in SCALE_KEYS:
+            fail(f"{where}: unknown key '{k}' (allowed: {', '.join(SCALE_KEYS)})")
+    if "max" not in scale:
+        fail(f"{where}: max is required: an integer from 1 to {SCALE_MAX}")
+    mx = scale["max"]
+    if not is_int(mx) or not 1 <= mx <= SCALE_MAX:
+        fail(f"{where}.max must be an integer from 1 to {SCALE_MAX}, got {mx}")
+    mn = scale.get("min", 1)
+    if not is_int(mn) or not 0 <= mn <= mx:
+        fail(f"{where}.min must be an integer from 0 to max ({mx}), got {mn}")
+    if "on" not in scale:
+        fail(f"{where}.on is required: exactly one of {ON_FORMS}")
+    on = scale["on"]
+    keys = list(on) if isinstance(on, dict) else None
+    trigger = next((t for t, form in TRIGGER_FORMS.items() if keys is not None and set(keys) == set(form)), None)
+    if trigger is None:
+        got = "{" + ", ".join(str(k) for k in keys) + "}" if keys is not None else yaml_text(on)
+        fail(f"{where}.on must be exactly one of {ON_FORMS}, got {got}")
+    if trigger in ("cpu", "memory"):
+        v = on[trigger]
+        if not is_int(v) or not 1 <= v <= 100:
+            fail(f"{where}.on.{trigger} must be an integer from 1 to 100 (percent of the {'CPU' if trigger == 'cpu' else 'memory'} request), got {v}")
+    if trigger == "consumes" and (not is_int(on["lag"]) or on["lag"] < 1):
+        fail(f"{where}.on.lag must be an integer of at least 1, got {on['lag']}")
+    if trigger == "cache":
+        if not isinstance(on["list"], str) or not on["list"]:
+            fail(f"{where}.on.list must be a non-empty string: the key of the list in the cache, got {on['list']}")
+        if not is_int(on["length"]) or on["length"] < 1:
+            fail(f"{where}.on.length must be an integer of at least 1, got {on['length']}")
+    if mn == 0 and trigger in ("cpu", "memory"):
+        fail(f"{where}: scale to zero (min: 0) needs a queue trigger (consumes or cache); a {trigger} trigger has nothing to measure at zero replicas")
+    return {"min": mn, "max": mx, "trigger": trigger, "on": dict(on)}
+
+
+EXCLUSIVE = "scale and replicas exclude each other; remove one (replicas is a fixed number, scale lets the autoscaler choose between min and max)"
+
+
+def validate_instances(c: str, spec: dict, external: bool, comp_scale: dict | None = None) -> dict:
     """The effective settings of every instance: {env: {replicas, resources, env, secrets}}; keys = where the component runs."""
     inst = spec.get("instances")
     if inst is None:
@@ -473,17 +930,30 @@ def validate_instances(c: str, spec: dict, external: bool) -> dict:
         label = f"components.{c}.instances.{e}"
         if not isinstance(i, dict):
             fail(f"{label} must be a mapping")
-        allowed = ["promote"] if external else INSTANCE_KEYS
+        allowed = ["promote", "autonomy"] if external else INSTANCE_KEYS
         for k in i:
             if k not in allowed:
                 fail(f"{label}: unknown key '{k}' (allowed: {', '.join(allowed)})")
         if "promote" in i:
             check_promote(f"{label}.promote", e, i["promote"])
         eff: dict = {}
+        if "autonomy" in i:
+            block = check_keys(f"{label}.autonomy", i["autonomy"] if i["autonomy"] is not None else {}, ["max"])
+            if "max" in block:
+                check_level(f"{label}.autonomy.max", block["max"])
+            eff["autonomy_max"] = block.get("max")
         if external:
             out[e] = eff
             continue
-        replicas = i.get("replicas", spec.get("replicas"))
+        scale = None
+        if "scale" in i:
+            if "replicas" in i:
+                fail(f"{label}: {EXCLUSIVE}")
+            scale = {**check_scale(label, i["scale"]), "source": "instance"}
+        elif "replicas" not in i and comp_scale is not None:
+            scale = {**comp_scale, "source": "component"}
+        eff["scale"] = scale
+        replicas = None if scale is not None else i.get("replicas", spec.get("replicas"))
         if replicas is not None:
             if isinstance(replicas, bool) or not isinstance(replicas, int):
                 fail(f"{label}.replicas must be a number")
@@ -573,7 +1043,12 @@ def validate_component(app_dir: Path, c: str, spec) -> dict:
     for k in ("port", "probes", "user", "volumes", "secretRefs", "expose", "metrics", "external"):
         if k in spec:
             svc[k] = spec[k]
-    eff = validate_instances(c, spec, external)
+    comp_scale = None
+    if not external and "scale" in spec:
+        if "replicas" in spec:
+            fail(f"components.{c}: {EXCLUSIVE}")
+        comp_scale = check_scale(f"components.{c}", spec["scale"])
+    eff = validate_instances(c, spec, external, comp_scale)
     svc["environments"] = list(eff)
     svc["_eff"] = eff
     if external:
@@ -588,9 +1063,13 @@ def validate_apis(doc: dict, comps: list[dict]) -> None:
     for a, conf in apis.items():
         if not isinstance(conf, dict) or conf.get("type") not in API_TYPES:
             fail(f"apis.{a}: type must be openapi, grpc, graphql or events")
+        events_api = conf["type"] == "events"
+        if "broker" in conf and not events_api:
+            fail(f"apis.{a}: only events APIs are carried by a broker (remove broker from this {conf['type']} API)")
+        allowed = ["type", "broker"] if events_api else ["type"]
         for k in conf:
-            if k != "type":
-                fail(f"apis.{a}: unknown key '{k}' (allowed: type)")
+            if k not in allowed:
+                fail(f"apis.{a}: unknown key '{k}' (allowed: {', '.join(allowed)})")
     for c in comps:
         for key in ("provides", "consumes"):
             for a in c[key]:
@@ -621,7 +1100,7 @@ def check_s3(where: str, s3) -> None:
         fail(f"{where}.forcePathStyle must be true or false")
 
 
-def check_remote(where: str, remote, keys: list[str] = REMOTE_KEYS) -> dict:
+def check_remote(where: str, remote, keys: list[str] = REMOTE_KEYS, placeholders: tuple[str, ...] = ("system", "env", "resource")) -> dict:
     """`remote` of a resource or of one of its instances: {path, refreshInterval}, both optional (a bucket also takes s3)."""
     if remote is None:
         return {}
@@ -631,7 +1110,7 @@ def check_remote(where: str, remote, keys: list[str] = REMOTE_KEYS) -> dict:
         if k not in keys:
             fail(f"{where}: unknown key '{k}' (allowed: {', '.join(keys)})")
     if remote.get("path") is not None:
-        check_placeholders(f"{where}.path", remote["path"], ["system", "env", "resource"])
+        check_placeholders(f"{where}.path", remote["path"], list(placeholders))
     if remote.get("refreshInterval") is not None and not isinstance(remote["refreshInterval"], str):
         fail(f"{where}.refreshInterval must be a string, e.g. 1h")
     if "s3" in remote:
@@ -644,12 +1123,92 @@ def check_replicas(where: str, replicas) -> None:
         fail(f"{where}: replicas must be a number of at least 1")
 
 
-def database_version(r: str, value) -> int:
+def database_version(r: str, value, where: str | None = None) -> int:
     if isinstance(value, str) and value.isdigit():
         value = int(value)
     if isinstance(value, bool) or value not in SUPPORTED_VERSIONS:
-        fail(f"resources.{r}: version '{value}' is not a supported database version ({', '.join(map(str, SUPPORTED_VERSIONS))})")
+        fail(f"{where or f'resources.{r}'}: version '{value}' is not a supported database version ({', '.join(map(str, SUPPORTED_VERSIONS))})")
     return value
+
+
+def cache_version(r: str, value, where: str | None = None) -> int:
+    if isinstance(value, str) and value.isdigit():
+        value = int(value)
+    if isinstance(value, bool) or value not in CACHE_VERSIONS:
+        fail(f"{where or f'resources.{r}'}: version '{value}' is not a supported cache version ({', '.join(map(str, CACHE_VERSIONS))})")
+    return value
+
+
+def broker_version(r: str, value, where: str | None = None) -> str:
+    """A NATS line; a YAML float is read as its text, and an instance's float that is no line gets the hint to write a string."""
+    raw = value
+    value = str(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else value
+    if not isinstance(value, str) or value not in BROKER_VERSIONS:
+        hint = '; write it as a string, e.g. "2.15"' if where and isinstance(raw, float) else ""
+        fail(f"{where or f'resources.{r}'}: version '{value}' is not a supported broker version ({', '.join(BROKER_VERSIONS)}){hint}")
+    return value
+
+
+def instance_versions(r: str, typ: str, inst: dict, external: dict[str, bool], default) -> dict[str, int | str]:
+    """The effective major of every in-cluster environment: the instance's `version`, else the resource's (`default`). The
+    instance values are checked here, in ENVS order, with the texts of the resource-level check under resources.<r>.instances.<env>."""
+    check = {"cache": cache_version, "broker": broker_version}.get(typ, database_version)
+    out: dict[str, int | str] = {}
+    for e in ENVS:
+        if external[e]:
+            continue
+        i = inst.get(e, {})
+        out[e] = check(r, i["version"], f"resources.{r}.instances.{e}") if "version" in i else default
+    return out
+
+
+def quantity_bytes(text) -> int:
+    """The byte value of a quantity (binary suffixes are powers of 1024, decimal ones of 1000), fractions floored; -1 if it is none."""
+    match = QUANTITY.match(str(text)) if isinstance(text, (str, int)) and not isinstance(text, bool) else None
+    if not match:
+        return -1
+    return int(Fraction(match.group(1)) * QUANTITY_FACTORS[match.group(2) or ""])
+
+
+def check_cache(r: str, rc: dict, inst: dict, external: dict[str, bool]) -> dict[str, int]:
+    """Value checks of a cache in the order of design.md (Render errors); returns the Valkey major of every in-cluster environment."""
+    versions: dict = {}
+    if not all(external.values()):
+        versions = instance_versions(r, "cache", inst, external, cache_version(r, rc.get("version", 9)))
+    for where, conf in [(f"resources.{r}", rc), *[(f"resources.{r}.instances.{e}", i) for e, i in inst.items()]]:
+        if "memory" in conf and quantity_bytes(conf["memory"]) < CACHE_MEMORY_MIN:
+            fail(f"{where}: memory '{conf['memory']}' must be a Kubernetes quantity of at least 64Mi, e.g. 256Mi")
+        if "maxmemoryPolicy" in conf and conf["maxmemoryPolicy"] not in MAXMEMORY_POLICIES:
+            fail(f"{where}: maxmemoryPolicy '{conf['maxmemoryPolicy']}' is not allowed ({', '.join(MAXMEMORY_POLICIES)})")
+        if "persistence" in conf and not isinstance(conf["persistence"], bool):
+            fail(f"{where}: persistence must be true or false")
+        if "storage" in conf and not (isinstance(conf["storage"], str) and STORAGE_SIZE.match(conf["storage"])):
+            fail(f"{where}: storage must be a size such as 1Gi")
+
+    def persistent(e: str) -> bool:
+        return inst.get(e, {}).get("persistence", rc.get("persistence", False))
+
+    for e in ENVS:
+        if "storage" in inst.get(e, {}) and not external[e] and not persistent(e):
+            fail(f"resources.{r}.instances.{e}: storage needs persistence: true (persistence is false in {e})")
+    if "storage" in rc and not any(persistent(e) for e in ENVS if not external[e]):
+        fail(f"resources.{r}: storage needs persistence: true in at least one environment")
+    return versions
+
+
+def check_broker(r: str, rc: dict, inst: dict, external: dict[str, bool]) -> dict[str, str]:
+    """Value checks of a broker in the order of design.md (Render errors); returns the NATS line of every in-cluster environment."""
+    versions: dict = {}
+    if not all(external.values()):
+        versions = instance_versions(r, "broker", inst, external, broker_version(r, rc.get("version", "2.15")))
+    for where, conf in [(f"resources.{r}", rc), *[(f"resources.{r}.instances.{e}", i) for e, i in inst.items()]]:
+        if "replicas" in conf and (isinstance(conf["replicas"], bool) or not isinstance(conf["replicas"], int) or conf["replicas"] not in (1, 3)):
+            fail(f"{where}: a broker runs with 1 or 3 replicas (replicas: {conf['replicas']})")
+        if "storage" in conf and not (isinstance(conf["storage"], str) and STORAGE_SIZE.match(conf["storage"])):
+            fail(f"{where}: storage must be a size such as 1Gi")
+        if "resources" in conf and not isinstance(conf["resources"], dict):
+            fail(f"{where}: resources must be a mapping with requests and limits, e.g. {{requests: {{cpu: 100m, memory: 256Mi}}, limits: {{memory: 512Mi}}}}")
+    return versions
 
 
 def check_bucket(system: str, r: str, rc: dict, inst: dict, in_cluster: bool) -> None:
@@ -668,7 +1227,72 @@ def check_bucket(system: str, r: str, rc: dict, inst: dict, in_cluster: bool) ->
             fail(f"resources.{r}: '{name}' is too long for the in-cluster store (at most {BUCKET_NAME_MAX} characters)")
 
 
-def validate_resource(doc: dict, r: str, rc) -> dict:
+IMAGE_MAJOR = {"database": re.compile(r"postgresql:(\d+)"), "cache": re.compile(r"valkey:(\d+)"), "broker": re.compile(r"nats:(\d+\.\d+)")}
+
+
+def table_pin(typ: str, major) -> dict:
+    """The versions table's pin of a major: {pin} (an image reference), and for a broker the chart version too."""
+    if typ == "database":
+        return {"pin": POSTGRES_IMAGES[major]}
+    if typ == "cache":
+        return {"pin": VALKEY_IMAGES[major]}
+    if typ == "broker":
+        return {"pin": NATS_IMAGES[major], "chart_version": NATS_CHART["chart_version"]}
+    return {"pin": SEAWEEDFS_IMAGE}
+
+
+def rendered_pin(path: Path, typ: str) -> dict | None:
+    """The engine image (and a broker's chart version) of a rendered instance file; None when it is absent or does not read as one."""
+    try:
+        doc = yaml.safe_load(path.read_text())
+        if typ == "database":
+            image = doc["spec"]["imageName"]
+            extra: dict = {}
+        elif typ == "cache":
+            image = next(c["image"] for c in doc["spec"]["template"]["spec"]["containers"] if c["name"] == "valkey")
+            extra = {}
+        elif typ == "broker":
+            source = doc["spec"]["source"]
+            ref = source["helm"]["valuesObject"]["container"]["image"]
+            image = f"{ref['repository']}:{ref['tag']}"
+            extra = {"chart_version": source["targetRevision"]}
+            if not isinstance(extra["chart_version"], str):
+                return None
+        else:
+            image = doc["spec"]["image"]
+            extra = {}
+    except (OSError, yaml.YAMLError, KeyError, IndexError, TypeError, StopIteration, AttributeError):
+        return None
+    return {"pin": image, **extra} if isinstance(image, str) and image else None
+
+
+def held_pin(app_dir: Path | None, system: str, r: str, typ: str, env: str, major) -> dict:
+    """The pin of an in-cluster instance (design.md, Pin of an in-cluster instance): the table's pin of its major in dev, with no rendered
+    file, or when the rendered image is of another major; otherwise (staging, prod) the image the existing rendered file already pins."""
+    table = table_pin(typ, major if typ != "bucket" else None)
+    if app_dir is None or env == "dev":
+        return table
+    folder = app_dir / "addons" / env / r
+    if typ == "database":
+        base = f"{system}-{r}"
+        try:
+            active = next(c["name"] for c in read_restore_state(app_dir, env, r)[0] if c["role"] == "active")
+        except (RenderError, StopIteration):
+            return table
+        file = "cluster.yaml" if active == base else f"cluster-g{active[len(base) + 2:]}.yaml"
+    else:
+        file = {"cache": "statefulset.yaml", "broker": "server.yaml", "bucket": "seaweed.yaml"}[typ]
+    held = rendered_pin(folder / file, typ)
+    if held is None:
+        return table
+    if typ != "bucket":
+        found = IMAGE_MAJOR[typ].search(held["pin"])
+        if not found or (found.group(1) if typ == "broker" else int(found.group(1))) != major:
+            return table
+    return held
+
+
+def validate_resource(doc: dict, r: str, rc, app_dir: Path | None = None) -> dict:
     """One resource, in the check order of design.md; returns {type, external, envs: {env: effective values}}."""
     types = f"({', '.join(RESOURCE_TYPES[:-1])} or {RESOURCE_TYPES[-1]})"
     if r == "observability":
@@ -679,14 +1303,18 @@ def validate_resource(doc: dict, r: str, rc) -> dict:
     if not isinstance(rc, dict) or rc.get("type") is None:
         fail(f"resources.{r}: type is required {types}")
     typ = rc["type"]
+    if typ in REDIS_TYPES:
+        fail(f"resources.{r}: type '{typ}' is not a resource type: the type is `cache` (Redis-compatible, runs Valkey)")
     if typ not in RESOURCE_TYPES:
         fail(f"resources.{r}: type '{typ}' is not a resource type {types}")
     if typ in PLANNED_TYPES:
         fail(f"resources.{r}: type {typ} is not available yet: spec {PLANNED_TYPES[typ]} brings it")
     bucket = typ == "bucket"
-    keys = BUCKET_KEYS if bucket else RESOURCE_KEYS
-    instance_keys = BUCKET_INSTANCE_KEYS if bucket else RESOURCE_INSTANCE_KEYS
-    sizing_keys = BUCKET_SIZING_KEYS if bucket else SIZING_KEYS
+    cache = typ == "cache"
+    brk = typ == "broker"
+    keys = BUCKET_KEYS if bucket else CACHE_KEYS if cache else BROKER_KEYS if brk else RESOURCE_KEYS
+    instance_keys = BUCKET_INSTANCE_KEYS if bucket else CACHE_INSTANCE_KEYS if cache else BROKER_INSTANCE_KEYS if brk else RESOURCE_INSTANCE_KEYS
+    sizing_keys = BUCKET_SIZING_KEYS if bucket else CACHE_SIZING_KEYS if cache else BROKER_SIZING_KEYS if brk else SIZING_KEYS
     for k in rc:
         if k not in keys:
             fail(f"resources.{r}: unknown key '{k}' (allowed: {', '.join(keys)})")
@@ -707,12 +1335,12 @@ def validate_resource(doc: dict, r: str, rc) -> dict:
         i = i or {}
         if "external" in i and not isinstance(i["external"], bool):
             fail(f"{where}: external must be true or false")
-        if not bucket and "backup" in i and i.get("external", base_external) is True:
+        if typ == "database" and "backup" in i and i.get("external", base_external) is True:
             fail(f"{where}: an external database is backed up by its provider (remove backup)")
         if i.get("external", base_external):
             for k in sizing_keys:
                 if k in i:
-                    fail(f"{where}: an external {typ} is sized and configured at its provider (remove {k})" if bucket
+                    fail(f"{where}: an external {typ} is sized and configured at its provider (remove {k})" if bucket or cache
                          else f"{where}: an external resource runs nothing (remove {k})")
         for k in i:
             if k not in instance_keys:
@@ -724,7 +1352,7 @@ def validate_resource(doc: dict, r: str, rc) -> dict:
         for k in sizing_keys:
             if k in rc:
                 fail(f"resources.{r}: external in every environment: an external {typ} is sized and configured at its provider "
-                     f"(remove {k})" if bucket else
+                     f"(remove {k})" if bucket or cache else
                      f"resources.{r}: external in every environment: an external resource runs nothing (remove {k})")
     if "remote" in rc and not any(external.values()):
         fail(f"resources.{r}: remote needs external: true")
@@ -732,73 +1360,148 @@ def validate_resource(doc: dict, r: str, rc) -> dict:
         if "remote" in i and not external[e]:
             fail(f"resources.{r}.instances.{e}: remote needs external: true in {e}")
     remote_keys = BUCKET_REMOTE_KEYS if bucket else REMOTE_KEYS
-    check_remote(f"resources.{r}.remote", rc.get("remote"), remote_keys)
+    holders = ("system", "env", "resource", "component") if brk else ("system", "env", "resource")
+    check_remote(f"resources.{r}.remote", rc.get("remote"), remote_keys, holders)
     for e, i in inst.items():
-        check_remote(f"resources.{r}.instances.{e}.remote", i.get("remote"), remote_keys)
+        check_remote(f"resources.{r}.instances.{e}.remote", i.get("remote"), remote_keys, holders)
     first = next((e for e in ENVS if external[e]), None)
     if first and not doc.get("secretStore"):
         fail(f"resources.{r}: external in {first} needs the system's secretStore (declare secretStore: {{name, kind}})")
-    version = None
+    versions: dict = {}
     if bucket:
         check_bucket(system=str(doc.get("system")), r=r, rc=rc, inst=inst, in_cluster=not all(external.values()))
+    elif cache:
+        versions = check_cache(r, rc, inst, external)
+    elif brk:
+        versions = check_broker(r, rc, inst, external)
     elif not all(external.values()):
-        version = database_version(r, rc.get("version", 17))
+        versions = instance_versions(r, typ, inst, external, database_version(r, rc.get("version", 17)))
     for where, conf in [(f"resources.{r}", rc), *[(f"resources.{r}.instances.{e}", i) for e, i in inst.items()]]:
-        if "replicas" in conf:
+        if "replicas" in conf and not brk:
             check_replicas(f"resources.{r}", conf["replicas"])
     envs: dict[str, dict] = {}
     for e in ENVS:
         i = inst.get(e, {})
         if external[e]:
-            remote = {**(check_remote("", rc.get("remote"), remote_keys)), **check_remote("", i.get("remote"), remote_keys)}
-            key = str(remote.get("path") or "{system}-{env}-{resource}").format(system=str(doc.get("system")), env=e, resource=r)
-            envs[e] = {"external": True, "version": None, "replicas": None, "storage": None, "resources": None,
+            remote = {**(check_remote("", rc.get("remote"), remote_keys, holders)), **check_remote("", i.get("remote"), remote_keys, holders)}
+            key = str(remote.get("path") or ("{system}-{env}-{resource}-{component}" if brk else "{system}-{env}-{resource}")).format(
+                system=str(doc.get("system")), env=e, resource=r, component="{component}")
+            envs[e] = {"external": True, "version": None, "pin": None, "replicas": None, "storage": None, "resources": None,
                        "store_key": key, "refreshInterval": str(remote.get("refreshInterval") or "1h")}
             if bucket:
                 s3 = (i.get("remote") or {}).get("s3") or (rc.get("remote") or {}).get("s3")
                 envs[e]["versioning"] = None
                 envs[e]["s3"] = dict(s3) if s3 else None
-            else:
+            elif cache:
+                envs[e].update({"memory": None, "maxmemory": None, "maxmemoryPolicy": None, "persistence": None})
+            elif typ == "database":
                 envs[e]["backup"] = None
             continue
+        if cache:
+            memory = str(i.get("memory", rc.get("memory", "256Mi")))
+            persistence = i.get("persistence", rc.get("persistence", False))
+            envs[e] = {"external": False, "version": versions[e], "replicas": None,
+                       "storage": str(i.get("storage", rc.get("storage", "1Gi"))) if persistence else None, "resources": None,
+                       "memory": memory, "maxmemory": quantity_bytes(memory) * 4 // 5,
+                       "maxmemoryPolicy": i.get("maxmemoryPolicy", rc.get("maxmemoryPolicy", "allkeys-lru")),
+                       "persistence": persistence, "store_key": None, "refreshInterval": None}
+            continue
         if bucket:
-            envs[e] = {"external": False, "version": None, "replicas": None, "storage": str(i.get("storage", rc.get("storage", "10Gi"))),
+            envs[e] = {"external": False, "version": None, "pin": None, "replicas": None, "storage": str(i.get("storage", rc.get("storage", "10Gi"))),
                        "resources": None, "versioning": i.get("versioning", rc.get("versioning", False)),
                        "store_key": None, "refreshInterval": None, "s3": None}
             continue
+        if brk:
+            storage = i.get("storage", rc.get("storage", "1Gi"))
+            envs[e] = {"external": False, "version": versions[e], "replicas": i.get("replicas", rc.get("replicas", 1)), "storage": str(storage),
+                       "resources": i.get("resources", rc.get("resources")), "store_key": None, "refreshInterval": None}
+            continue
         storage = i.get("storage", rc.get("storage"))
-        envs[e] = {"external": False, "version": version, "replicas": int(i.get("replicas", rc.get("replicas", 1))),
+        envs[e] = {"external": False, "version": versions[e], "replicas": int(i.get("replicas", rc.get("replicas", 1))),
                    "storage": "1Gi" if storage is None else str(storage), "resources": i.get("resources", rc.get("resources")),
                    "store_key": None, "refreshInterval": None, "backup": None}
+    for e, env in envs.items():
+        if not env["external"]:
+            env.update(held_pin(app_dir, str(doc.get("system")), r, typ, e, env["version"]))
     return {"type": typ, "external": bool(base_external), "envs": envs}
 
 
-def validate_resources(doc: dict) -> dict:
+def validate_resources(doc: dict, app_dir: Path | None = None) -> dict:
     """The normalised resources: {name: {type, external, envs: {env: {external, version, replicas, storage, resources, store_key,
     refreshInterval}}}}, with the effective values of all three environments (design.md, Renderer API)."""
     res = doc.get("resources") or {}
     if not isinstance(res, dict):
         fail("resources must be a mapping of names to resources")
-    return {r: validate_resource(doc, r, rc) for r, rc in res.items()}
+    return {r: validate_resource(doc, r, rc, app_dir) for r, rc in res.items()}
 
 
-def object_names(system: str, r: str, typ: str) -> list[str]:
-    """The cluster objects a resource creates (design.md): a database the CloudNativePG family, any other type the object and its Secret."""
+def object_names(system: str, r: str, typ: str, users: tuple[str, ...] | list[str] = ()) -> list[str]:
+    """The cluster objects a resource creates (design.md): a database the CloudNativePG family, a broker its chart objects and one Secret
+    per participating component (`users`), any other type the object and its Secret."""
     base = f"{system}-{r}"
-    return [base, *(base + s for s in (CNPG_SUFFIXES if typ == "database" else BUCKET_SUFFIXES if typ == "bucket" else ("-app",)))]
+    if typ == "broker":
+        return [base, *(base + s for s in BROKER_SUFFIXES), *(f"{base}-{c}-app" for c in users)]
+    return [base, *(base + s for s in (CNPG_SUFFIXES if typ == "database" else BUCKET_SUFFIXES if typ == "bucket" else CACHE_SUFFIXES if typ == "cache" else ("-app",)))]
 
 
-def check_resource_clashes(system: str, resources: dict, comps_doc: dict, comps: list[dict]) -> None:
+def broker_users(events: dict, comps: list[dict], broker_name: str) -> list[str]:
+    """The components (not libraries) that provide or consume an events API the broker carries, in `components:` order."""
+    return [c["name"] for c in comps if c["type"] != "library"
+            and any(events.get(a, {}).get("broker") == broker_name for a in [*c["provides"], *c["consumes"]])]
+
+
+def bind_events(doc: dict, comps: list[dict], resources: dict) -> dict:
+    """Binds every events API to a broker (design.md, Binding); returns {api: {broker, provider, consumers}} in `apis:` order.
+    An API with no `broker:` in a system without any broker stays unbound (`broker` None); the render prints a note."""
+    brokers = [r for r, rc in resources.items() if rc["type"] == "broker"]
+    out: dict[str, dict] = {}
+    for a, conf in (doc.get("apis") or {}).items():
+        if conf["type"] != "events":
+            continue
+        bound = None
+        if "broker" in conf:
+            bound = conf["broker"]
+            if not isinstance(bound, str) or bound not in brokers:
+                fail(f"apis.{a}: broker '{bound}' is not a broker resource of the system (brokers: {names_list(brokers)})")
+        elif len(brokers) > 1:
+            fail(f"apis.{a}: the system has several brokers ({', '.join(brokers)}): choose one with apis.{a}.broker")
+        elif brokers:
+            bound = brokers[0]
+        if bound is not None and not EVENTS_API_NAME.match(str(a)):
+            fail(f"apis.{a}: an events API carried by a broker needs a lowercase DNS label as its name "
+                 f"(it names the stream {doc.get('system')}-{a} and the subjects {doc.get('system')}.{a}.>)")
+        run = [c for c in comps if c["type"] != "library"]
+        out[a] = {"broker": bound, "provider": next((c["name"] for c in run if a in c["provides"]), None),
+                  "consumers": [c["name"] for c in run if a in c["consumes"]]}
+    return out
+
+
+def effective_uses(c: dict, resources: dict, events: dict) -> list[str]:
+    """The declared non-broker resources in `uses` order, then the brokers of the component's events APIs (provides, then consumes), once each."""
+    out = [u for u in c.get("uses") or [] if u in resources and resources[u]["type"] != "broker"]
+    for a in [*c["provides"], *c["consumes"]]:
+        b = events.get(a, {}).get("broker")
+        if b and b not in out:
+            out.append(b)
+    return out
+
+
+def check_resource_clashes(system: str, resources: dict, comps_doc: dict, comps: list[dict], events: dict | None = None) -> None:
     for r in resources:
         if r in comps_doc:
             fail(f"resources.{r}: components.{r} has the same name; a resource and a component need different names")
     names = list(resources)
     for n, a in enumerate(names):
         for b in names[n + 1:]:
-            both = [o for o in object_names(system, a, resources[a]["type"]) if o in object_names(system, b, resources[b]["type"])]
+            names_a = object_names(system, a, resources[a]["type"], broker_users(events or {}, comps, a))
+            names_b = object_names(system, b, resources[b]["type"], broker_users(events or {}, comps, b))
+            both = [o for o in names_a if o in names_b]
             if both:
                 fail(f"resources.{a} and resources.{b} would both create the object {both[0]}; rename one")
-    connection = {f"{system}-{r}-app": r for r in resources}
+    connection = {f"{system}-{r}-app": r for r in resources if resources[r]["type"] != "broker"}
+    for r in resources:
+        if resources[r]["type"] == "broker":
+            connection.update({f"{system}-{r}-{c}-app": r for c in broker_users(events or {}, comps, r)})
     for c in comps:
         for sec in (comps_doc.get(c["name"]) or {}).get("secrets") or []:
             if isinstance(sec, dict) and sec.get("name") in connection:
@@ -818,21 +1521,104 @@ def variable_names(uses: list[str], resources: dict) -> list[tuple[str, list[str
     return out
 
 
-def validate_uses(comps: list[dict], resources: dict) -> None:
+def validate_uses(comps: list[dict], resources: dict, events: dict | None = None) -> None:
+    events = events or {}
     libs = [c["name"] for c in comps if c["type"] == "library"]
     for s in comps:
         for u in s.get("uses") or []:
             if u not in resources and u not in libs:
                 fail(f"components.{s['name']}: uses '{u}', which is neither a resource nor a library of the system "
                      f"(resources: {names_list(resources)}; libraries: {names_list(libs)})")
+        if s["type"] == "library":
+            continue
+        effective = effective_uses(s, resources, events)
         for u in s.get("uses") or []:
-            if u not in resources:
-                continue
-            names = dict(variable_names(s.get("uses") or [], resources))[u]
+            if u in resources and resources[u]["type"] == "broker" and u not in effective:
+                fail(f"components.{s['name']}: uses '{u}', a broker; a component reaches a broker through an events API it provides or "
+                     f"consumes, and none of {s['name']}'s is carried by {u}")
+        names_by = dict(variable_names(effective, resources))
+        first_broker = next((u for u in effective if resources[u]["type"] == "broker"), None)
+        for u in effective:
+            names = list(names_by[u])
+            if resources[u]["type"] == "broker":
+                for a in dict.fromkeys([*s["provides"], *s["consumes"]]):
+                    if events.get(a, {}).get("broker") == u:
+                        prefix = "EVENTS_" + a.upper().replace("-", "_") + "_"
+                        names += [prefix + "STREAM", prefix + "SUBJECT_PREFIX", *([prefix + "CONSUMER"] if a in s["consumes"] else [])]
+                if u == first_broker:
+                    names.append("NATS_INBOX_PREFIX")
             for env, eff in (s.get("_eff") or {}).items():
                 clash = [k for k in names if k in (eff.get("env") or {})]
                 if clash:
                     fail(f"components.{s['name']}: env {', '.join(clash)} is provided by the '{u}' resource; remove it from `env`")
+        for eff in (s.get("_eff") or {}).values():
+            validate_env_vars(f"components.{s['name']}", {k: v for k, v in (eff.get("env") or {}).items() if k in BROKER_ENV_NAMES}, defer=False)
+
+
+def check_scale_refs(where: str, c: dict, mn: int, on: dict, apis: dict, resources: dict, events: dict) -> None:
+    """The reference checks of one declared `scale` (design.md, Reference and effective checks)."""
+    name = c["name"]
+    if "consumes" in on:
+        api = on["consumes"]
+        if api not in c["consumes"]:
+            fail(f"{where}.on.consumes: {name} does not consume '{api}' (consumes: {names_list(c['consumes'])})")
+        typ = (apis.get(api) or {}).get("type")
+        if typ != "events":
+            fail(f"{where}.on.consumes: '{api}' is a {typ} API; only an events API carried by a broker has a queue to scale on")
+        if events.get(api, {}).get("broker") is None:
+            fail(f"{where}.on.consumes: the events API '{api}' is carried by no broker; add one with /resource:add <name> --type broker")
+    if "cache" in on:
+        r = on["cache"]
+        if r not in resources or resources[r]["type"] != "cache":
+            caches = [x for x, rc in resources.items() if rc["type"] == "cache"]
+            fail(f"{where}.on.cache: '{r}' is not a cache resource of the system (caches: {names_list(caches)})")
+        if r not in (c.get("uses") or []):
+            fail(f"{where}.on.cache: {name} does not use the cache '{r}'; add it to components.{name}.uses")
+    if mn == 0:
+        what = []
+        if c.get("expose"):
+            expose = c["expose"]
+            host = (expose.get("host") if isinstance(expose, dict) else None) or name
+            what.append(f"exposed at host {host}")
+        requests = [f"{a} ({apis[a]['type']})" for a in c["provides"] if apis.get(a, {}).get("type") in REQUEST_API_TYPES]
+        if requests:
+            what.append("provides " + ", ".join(requests))
+        if what:
+            fail(f"{where}: min 0 is not possible for {name}: an instance at zero replicas cannot answer requests ({'; '.join(what)})")
+
+
+def validate_scaling(comps: list[dict], comps_doc: dict, apis: dict, resources: dict, events: dict) -> None:
+    for c in comps:
+        if c["type"] == "library" or "external" in c:
+            continue
+        name = c["name"]
+        spec = {str(k): v for k, v in comps_doc.items()}[name]
+        declared = [(f"components.{name}.scale", spec["scale"])] if "scale" in spec else []
+        for e, i in (spec.get("instances") or {}).items():
+            if isinstance(i, dict) and "scale" in i:
+                declared.append((f"components.{name}.instances.{e}.scale", i["scale"]))
+        for where, raw in declared:
+            check_scale_refs(where, c, raw.get("min", 1), raw["on"], apis, resources, events)
+        for e in ENVS:
+            scale = c["_eff"].get(e, {}).get("scale")
+            if scale is None:
+                continue
+            label = f"components.{name}.instances.{e}"
+            if scale["trigger"] in ("cpu", "memory"):
+                if not ((c["_eff"][e].get("resources") or {}).get("requests") or {}).get(scale["trigger"]):
+                    what = "a CPU request" if scale["trigger"] == "cpu" else "a memory request"
+                    fail(f"{label}: scale on {scale['trigger']} needs {what}; set resources.requests.{scale['trigger']} on components.{name} or on this instance")
+            elif scale["trigger"] == "consumes":
+                api = scale["on"]["consumes"]
+                broker_name = events[api]["broker"]
+                if resources[broker_name]["envs"][e]["external"]:
+                    fail(f"{label}: scale on consumes '{api}' needs the broker {broker_name} in the cluster, but it is external in {e}; "
+                         f"the platform cannot read the queue depth of an external broker")
+
+
+def scaled_instances(services: list[dict], env: str) -> list[str]:
+    """The non-external components running in `env` with an effective scale, in `components:` order."""
+    return [s["name"] for s in services if "external" not in s and env in s["environments"] and s["_eff"][env].get("scale")]
 
 
 def check_cron(where: str, value) -> None:
@@ -915,6 +1701,7 @@ def _load_system(app_dir: Path) -> dict:
         fail(f"is not valid YAML ({str(e).splitlines()[0] if str(e) else e})")
     if not isinstance(doc, dict):
         fail(f"must be a mapping with {', '.join(TOP_KEYS[:4])}")
+    scale_on_keys(doc)
     for k in doc:
         if k not in TOP_KEYS:
             fail(f"unknown key '{k}' (allowed: {', '.join(TOP_KEYS)})")
@@ -925,23 +1712,30 @@ def _load_system(app_dir: Path) -> dict:
     if not isinstance(doc.get("owner"), str) or not doc["owner"].strip():
         fail("owner is required: a non-empty string")
     hosts, env_conf = validate_environments(doc)
+    paused = validate_pause(doc)
     comps_doc = doc.get("components") or {}
     if not isinstance(comps_doc, dict):
         fail("components must be a mapping of names to components")
     comps = [validate_component(app_dir, str(c), spec) for c, spec in comps_doc.items()]
     validate_apis(doc, comps)
-    resources = validate_resources(doc)
-    check_resource_clashes(d, resources, comps_doc, comps)
-    validate_uses(comps, resources)
+    resources = validate_resources(doc, app_dir)
+    events = bind_events(doc, comps, resources)
+    check_resource_clashes(d, resources, comps_doc, comps, events)
+    validate_uses(comps, resources, events)
+    validate_scaling(comps, comps_doc, doc.get("apis") or {}, resources, events)
     backups = validate_backups(doc, env_conf, resources, comps)
     registries = doc.get("registries") or []
     if not isinstance(registries, list):
         fail("registries must be a list of image prefixes, e.g. [ghcr.io/acme/]")
-    services = [{**c, "uses": [u for u in c.get("uses") or [] if u in resources]} for c in comps if c["type"] != "library"]
+    services = [{**c, "uses": effective_uses(c, resources, events)} for c in comps if c["type"] != "library"]
     cfg = {"gateway": doc.get("gateway"), "secretStore": doc.get("secretStore"), "hosts": hosts, "registries": [str(r) for r in registries],
            "policy": env_conf["policy"], "observability": env_conf["observability"], "operators": env_conf["operators"],
-           "backup": backups, "resources": resources}
-    return {"system": d, "owner": doc["owner"], "services": services, "libraries": [c["name"] for c in comps if c["type"] == "library"], "cfg": cfg}
+           "backup": backups, "resources": resources, "events": events}
+    cfg["autoscaling"] = {e: "keda" if any(s["_eff"][e]["scale"]["trigger"] in ("consumes", "cache") for s in services if "external" not in s
+                                          and e in s["environments"] and s["_eff"][e].get("scale")) else None for e in ENVS}
+    declared = "autonomy" in doc or env_conf["declared"] or any("autonomy_max" in s["_eff"][e] for s in services for e in s["environments"])
+    autonomy = autonomy_json(d, paused, env_conf["autonomy"], env_conf["promote"], services) if declared else None
+    return {"system": d, "owner": doc["owner"], "autonomy": autonomy, "services": services, "libraries": [c["name"] for c in comps if c["type"] == "library"], "cfg": cfg}
 
 
 # ---------------- manifests ----------------
@@ -1075,8 +1869,61 @@ def labels_for(app: str, svc: dict) -> dict:
     return {"app": svc["name"], "app.kubernetes.io/name": svc["name"], "app.kubernetes.io/part-of": app, "app.kubernetes.io/managed-by": "gitops-app"}
 
 
+KEDA_POLLING = 15
+KEDA_COOLDOWN = 315
+SCALE_DOWN_WINDOW = 345
+
+
 def replicas_for(svc: dict, env: str) -> int:
+    if svc.get("scale"):
+        return int(svc["scale"]["min"])
     return int(svc.get("replicas", 1))
+
+
+def autoscaler_files(app: str, svc: dict, env: str, cfg: dict) -> dict[str, dict]:
+    """The autoscaler documents of a scaled instance (spec 120): an HPA for cpu and memory, a KEDA ScaledObject for queue triggers."""
+    scale = svc.get("scale")
+    if not scale:
+        return {}
+    name, mn, mx, trigger, on = svc["name"], scale["min"], scale["max"], scale["trigger"], scale["on"]
+    target = {"apiVersion": "apps/v1", "kind": "Deployment", "name": name}
+    if trigger in ("cpu", "memory"):
+        return {"hpa.yaml": {
+            "apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler",
+            "metadata": {"name": name, "labels": labels_for(app, svc)},
+            "spec": {"scaleTargetRef": target, "minReplicas": mn, "maxReplicas": mx,
+                     "metrics": [{"type": "Resource", "resource": {"name": trigger, "target": {"type": "Utilization", "averageUtilization": on[trigger]}}}]},
+        }}
+    files: dict[str, dict] = {}
+    if trigger == "consumes":
+        api = on["consumes"]
+        broker = cfg["events"][api]["broker"]
+        entry: dict = {"type": "nats-jetstream", "metadata": {
+            "natsServerMonitoringEndpoint": f"{app}-{broker}.{app}-{env}.svc:8222", "account": "$G", "stream": f"{app}-{api}",
+            "consumer": name, "lagThreshold": str(on["lag"]), "activationLagThreshold": "0", "useHttps": "false"}}
+    else:
+        entry = {"type": "redis", "metadata": {"listName": on["list"], "listLength": str(on["length"]), "activationListLength": "0",
+                                               "databaseIndex": "0"},
+                 "authenticationRef": {"name": name, "kind": "TriggerAuthentication"}}
+        secret = f"{app}-{on['cache']}-app"
+        files["triggerauthentication.yaml"] = {
+            "apiVersion": "keda.sh/v1alpha1", "kind": "TriggerAuthentication",
+            "metadata": {"name": name, "labels": labels_for(app, svc),
+                         "annotations": {"argocd.argoproj.io/sync-options": "SkipDryRunOnMissingResource=true"}},
+            "spec": {"secretTargetRef": [{"parameter": p, "name": secret, "key": p} for p in ("host", "port", "password")]},
+        }
+    files["scaledobject.yaml"] = {
+        "apiVersion": "keda.sh/v1alpha1", "kind": "ScaledObject",
+        "metadata": {"name": name, "labels": labels_for(app, svc),
+                     "annotations": {"argocd.argoproj.io/sync-wave": "1", "argocd.argoproj.io/sync-options": "SkipDryRunOnMissingResource=true"}},
+        "spec": {"scaleTargetRef": target, "pollingInterval": KEDA_POLLING, "cooldownPeriod": KEDA_COOLDOWN,
+                 "minReplicaCount": mn, "maxReplicaCount": mx,
+                 "advanced": {"horizontalPodAutoscalerConfig": {"behavior": {"scaleDown": {
+                     "stabilizationWindowSeconds": SCALE_DOWN_WINDOW,
+                     "policies": [{"type": "Percent", "value": 100, "periodSeconds": 15}]}}}},
+                 "triggers": [entry]},
+    }
+    return files
 
 
 def addon_env(app: str, svc: dict, resources: dict) -> list[dict]:
@@ -1084,7 +1931,23 @@ def addon_env(app: str, svc: dict, resources: dict) -> list[dict]:
     out = []
     for u, names in variable_names(svc.get("uses") or [], resources):
         env = TYPES[resources[u]["type"]]["env"]
-        out += [{"name": name, "valueFrom": {"secretKeyRef": {"name": f"{app}-{u}-app", "key": key}}} for name, key in zip(names, env.values())]
+        secret = f"{app}-{u}-{svc['name']}-app" if resources[u]["type"] == "broker" else f"{app}-{u}-app"      # a broker: one Secret per component
+        out += [{"name": name, "valueFrom": {"secretKeyRef": {"name": secret, "key": key}}} for name, key in zip(names, env.values())]
+    return out
+
+
+def events_env(app: str, svc: dict, events: dict) -> dict[str, str]:
+    """Literal variables of the events APIs a component provides or consumes on a broker (spec 119): stream, subject prefix, consumer, inbox prefix."""
+    out: dict[str, str] = {}
+    for a in dict.fromkeys([*svc.get("provides", []), *svc.get("consumes", [])]):
+        if events.get(a, {}).get("broker") is None:
+            continue
+        prefix = "EVENTS_" + a.upper().replace("-", "_") + "_"
+        out[prefix + "STREAM"] = f"{app}-{a}"
+        out[prefix + "SUBJECT_PREFIX"] = f"{app}.{a}"
+        if a in svc.get("consumes", []):
+            out[prefix + "CONSUMER"] = svc["name"]
+        out["NATS_INBOX_PREFIX"] = f"_INBOX.{svc['name']}"
     return out
 
 
@@ -1095,10 +1958,10 @@ def obs_env(app: str, svc: dict, env: str) -> dict[str, str]:
             "OTEL_SDK_DISABLED": "false"}
 
 
-def deployment(app: str, svc: dict, env: str, obs: bool = False, resources: dict | None = None) -> dict:
+def deployment(app: str, svc: dict, env: str, obs: bool = False, resources: dict | None = None, events: dict | None = None) -> dict:
     labels = labels_for(app, svc)
     selector = {"app": svc["name"]}
-    env_vars = {"PORT": str(svc["port"]), **(obs_env(app, svc, env) if obs else {}), **{k: str(v) for k, v in (svc.get("env") or {}).items()}}
+    env_vars = {"PORT": str(svc["port"]), **(obs_env(app, svc, env) if obs else {}), **events_env(app, svc, events or {}), **{k: str(v) for k, v in (svc.get("env") or {}).items()}}
     container: dict = {
         "name": "app",
         "image": svc["image"],
@@ -1157,7 +2020,7 @@ def httproute(app: str, svc: dict, env: str, cfg: dict) -> dict | None:
 
 
 def secret_manifests(app: str, svc: dict, env: str, cfg: dict) -> dict[str, dict]:
-    """ExternalSecrets (+ one Password generator per component) for `secrets:`; values never appear in git."""
+    """ExternalSecrets of the `remote:` secrets and one credentials Job for all `generate:` secrets; values never appear in git."""
     out: dict[str, dict] = {}
     labels = labels_for(app, svc)
     store = cfg.get("secretStore") or DEFAULT_STORE
@@ -1166,14 +2029,7 @@ def secret_manifests(app: str, svc: dict, env: str, cfg: dict) -> dict[str, dict
         meta = {"name": name, "labels": labels}
         target = {"name": name, "creationPolicy": "Owner", "deletionPolicy": "Retain"}
         if sec.get("generate"):
-            gen_ref = {"apiVersion": GEN_API, "kind": "Password", "name": f"{svc['name']}-password"}
-            spec = {"refreshInterval": "0", "target": target, "dataFrom": [
-                {"sourceRef": {"generatorRef": dict(gen_ref)}, "rewrite": [{"regexp": {"source": "^password$", "target": k}}]}
-                for k in sec["generate"]]}
-            out[f"externalsecret-{name}.yaml"] = {"apiVersion": ESO_API, "kind": "ExternalSecret", "metadata": meta, "spec": spec}
-            out["password-generator.yaml"] = {
-                "apiVersion": GEN_API, "kind": "Password", "metadata": {"name": f"{svc['name']}-password", "labels": labels},
-                "spec": {"length": int(sec.get("length", 32)), "digits": 5, "symbols": 0, "noUpper": False, "allowRepeat": True}}
+            continue        # written once by the component's credentials Job (spec 128)
         else:
             remote = sec["remote"]
             key = str(remote.get("path") or "{system}-{env}-{secret}").format(system=app, env=env, secret=name, component=svc["name"])
@@ -1182,6 +2038,13 @@ def secret_manifests(app: str, svc: dict, env: str, cfg: dict) -> dict[str, dict
                     "target": target,
                     "data": [{"secretKey": k, "remoteRef": {"key": key, "property": k}} for k in remote["keys"]]}
             out[f"externalsecret-{name}.yaml"] = {"apiVersion": ESO_API, "kind": "ExternalSecret", "metadata": meta, "spec": spec}
+    generated = [sec for sec in svc.get("secrets") or [] if sec.get("generate")]
+    if generated:
+        plan = {"namespace": f"{app}-{env}",
+                "secrets": [{"name": sec["name"], "labels": dict(labels),
+                             "generate": {k: int(sec.get("length", 32)) for k in sec["generate"]}, "data": {}} for sec in generated],
+                "retire": {"externalSecrets": sorted(sec["name"] for sec in generated), "generators": [f"{svc['name']}-password"]}}
+        out.update(credentials_files(app, env, svc["name"], labels, plan))
     return out
 
 
@@ -1202,7 +2065,7 @@ def external_secrets(app: str, env: str, services: list[dict], cfg: dict) -> dic
     out: dict[str, dict[str, dict]] = {}
     for name, rc in cfg["resources"].items():
         conf = rc["envs"][env]
-        if not conf["external"]:
+        if not conf["external"] or rc["type"] == "broker":      # a broker's ExternalSecrets are per component (spec 119)
             continue
         users = sorted(s["name"] for s in services if env in envs_of(s) and "external" not in s and name in (s.get("uses") or []))
         if not users:
@@ -1220,6 +2083,32 @@ def external_secrets(app: str, env: str, services: list[dict], cfg: dict) -> dic
             doc["spec"]["target"]["template"] = {"engineVersion": "v2", "mergePolicy": "Merge",
                                                  "metadata": {"labels": backup_target_labels(app, name)}}
         out.setdefault(users[0], {})[f"externalsecret-{secret}.yaml"] = doc
+    return out
+
+
+def broker_secrets(app: str, env: str, services: list[dict], cfg: dict) -> dict[str, dict[str, dict]]:
+    """{component: {file name: ExternalSecret}} for the external broker instances of `env` (spec 119): one `<system>-<broker>-<component>-app`
+    per running, non-external component that provides or consumes an API the broker carries, in that component's overlay."""
+    store = cfg.get("secretStore") or DEFAULT_STORE
+    out: dict[str, dict[str, dict]] = {}
+    for name, rc in cfg["resources"].items():
+        if rc["type"] != "broker" or not rc["envs"][env]["external"]:
+            continue
+        conf = rc["envs"][env]
+        apis = {a for a, e in cfg["events"].items() if e["broker"] == name}
+        for s in services:
+            if env not in envs_of(s) or "external" in s or not any(a in apis for a in [*s["provides"], *s["consumes"]]):
+                continue
+            secret = f"{app}-{name}-{s['name']}-app"
+            key = conf["store_key"].replace("{component}", s["name"])
+            out.setdefault(s["name"], {})[f"externalsecret-{secret}.yaml"] = {
+                "apiVersion": ESO_API, "kind": "ExternalSecret",
+                "metadata": {"name": secret, "labels": {"app.kubernetes.io/name": name, "app.kubernetes.io/part-of": app,
+                                                        "app.kubernetes.io/managed-by": "gitops-app"}},
+                "spec": {"refreshInterval": conf["refreshInterval"],
+                         "secretStoreRef": {"name": store["name"], "kind": store.get("kind", "ClusterSecretStore")},
+                         "target": {"name": secret, "creationPolicy": "Orphan", "deletionPolicy": "Retain"},
+                         "data": [{"secretKey": k, "remoteRef": {"key": key, "property": k}} for k in TYPES["broker"]["keys"]]}}
     return out
 
 
@@ -1241,14 +2130,15 @@ def utc_time(value) -> bool:
     return True
 
 
-def read_restore_state(app_dir: Path, env: str, db: str) -> list[dict]:
-    """The clusters of addons/<env>/<db>/restore-state.yaml (spec 117, written by `cplat resource restore`): a list of
-    {name, role, from?, until?}. Absent file = one active cluster `<system>-<db>`."""
+def read_restore_state(app_dir: Path, env: str, db: str) -> tuple[list[dict], list[dict]]:
+    """(clusters, archives) of addons/<env>/<db>/restore-state.yaml (spec 117, written by `cplat resource restore`; `archives` by
+    `cplat resource upgrade`, spec 121): the clusters are a list of {name, role, from?, until?}, the archives a list of {server, major}
+    whose last entry is the current Barman archive. Absent file = one active cluster `<system>-<db>`, no archives."""
     app = app_dir.name
     base = f"{app}-{db}"
     path = app_dir / "addons" / env / db / "restore-state.yaml"
     if not path.is_file():
-        return [{"name": base, "role": "active"}]
+        return [{"name": base, "role": "active"}], []
 
     def bad(reason: str):
         raise RenderError(f"applications/{app}/addons/{env}/{db}/restore-state.yaml is not valid ({reason}); take it from git history")
@@ -1276,6 +2166,8 @@ def read_restore_state(app_dir: Path, env: str, db: str) -> list[dict]:
                 bad(f"cluster '{c['name']}': from.to must be an RFC 3339 UTC time ending in Z, or latest")
         if c["role"] == "previous" and not utc_time(c.get("until")):
             bad(f"cluster '{c['name']}' is previous and needs until, an RFC 3339 UTC time ending in Z")
+        if "archive" in c and (not isinstance(c["archive"], str) or not c["archive"]):
+            bad(f"cluster '{c['name']}': archive must be a server name")
     if sum(c["role"] == "active" for c in clusters) != 1:
         bad("exactly one cluster must be active")
     if sum(c["role"] != "active" for c in clusters) > 1:
@@ -1283,7 +2175,20 @@ def read_restore_state(app_dir: Path, env: str, db: str) -> list[dict]:
     nxt = doc.get("next")
     if isinstance(nxt, bool) or not isinstance(nxt, int) or any(nxt <= n for n in numbers):
         bad("next must be an integer greater than every generation number")
-    return clusters
+    if "archives" not in doc:
+        return clusters, []
+    archives = doc["archives"]
+    if not isinstance(archives, list) or not archives:
+        bad("archives: must be a list with at least one archive")
+    for a in archives:
+        if (not isinstance(a, dict) or not isinstance(a.get("server"), str) or not a["server"]
+                or isinstance(a.get("major"), bool) or not isinstance(a.get("major"), int)):
+            bad("archives: every archive needs a server and a major")
+        if a["major"] not in POSTGRES_IMAGES:
+            bad(f"archives: major {a['major']} is not in the versions table")
+    if len({a["server"] for a in archives}) != len(archives):
+        bad("archives: servers must be unique")
+    return clusters, [{"server": a["server"], "major": a["major"]} for a in archives]
 
 
 def backup_target(app: str, env: str, cfg: dict, to: str) -> tuple[str, str, str]:
@@ -1295,13 +2200,32 @@ def backup_target(app: str, env: str, cfg: dict, to: str) -> tuple[str, str, str
     return f"{app}-{to}", f"http://{app}-{to}-filer.{app}-{env}.svc:8333", secret
 
 
+def stepped_since(archives: list[dict], cluster: str, version: int) -> bool:
+    """True when a major step appended an archive of the effective major after the generation's own archive (spec 121, AC-121.16)."""
+    own = next((i for i, a in enumerate(archives) if a["server"] == cluster), None)
+    return own is not None and own < len(archives) - 1 and archives[-1]["major"] == version
+
+
 def database_cluster(app: str, name: str, env: str, conf: dict, cluster: str | None = None, role: str = "active",
-                     frm: dict | None = None, backup: bool = False) -> dict:
+                     frm: dict | None = None, backup: bool = False, archives: list[dict] | None = None, archive: str | None = None) -> dict:
     db = app.replace("-", "_")
     base = f"{app}-{name}"
+    image = conf["pin"]
+    # a physical backup only starts on the major of its archive (spec 121, changed after review): a previous cluster runs the major of
+    # the archive it wrote to (its `archive`, recorded at the switch); a restored generation runs the major of its source archive; the
+    # active generation keeps its source archive's major only until a major step appended a later archive with the effective major
+    # a server missing from a non-empty `archives` predates the first major step: it ran archives[0]'s major (AC-121.16, changed after review)
+    major_of = lambda server: next((a["major"] for a in archives or [] if a["server"] == server), archives[0]["major"] if archives else None)  # noqa: E731
+    previous_major = major_of(archive) if role == "previous" and archive else None
+    if previous_major is not None:
+        image = conf["pin"] if previous_major == conf["version"] else POSTGRES_IMAGES[previous_major]
+    elif frm is not None and (role == "restored" or not stepped_since(archives or [], cluster or base, conf["version"])):
+        source_major = major_of(frm["server"])
+        if source_major is not None and source_major != conf["version"]:
+            image = POSTGRES_IMAGES[source_major]
     spec: dict = {
         "instances": conf["replicas"],
-        "imageName": POSTGRES_IMAGES[conf["version"]],
+        "imageName": image,
         "storage": {"size": conf["storage"]},
         "enableSuperuserAccess": False,
     }
@@ -1315,7 +2239,11 @@ def database_cluster(app: str, name: str, env: str, conf: dict, cluster: str | N
         spec["externalClusters"] = [{"name": "origin", "plugin": {"name": BARMAN_PLUGIN, "parameters": {"barmanObjectName": base, "serverName": frm["server"]}}}]
     spec["resources"] = conf["resources"] or DB_DEFAULT_RESOURCES
     if backup and role in ("active", "previous"):
-        spec["plugins"] = [{"name": BARMAN_PLUGIN, "isWALArchiver": True, "parameters": {"barmanObjectName": base}}]
+        params = {"barmanObjectName": base}
+        server = archive or (archives[-1]["server"] if archives else None)      # one Barman server per major (change it with imageName)
+        if server and server != (cluster or base):      # spec 121 (changed after review): a switched generation has its own `archive`
+            params["serverName"] = server
+        spec["plugins"] = [{"name": BARMAN_PLUGIN, "isWALArchiver": True, "parameters": params}]
     return {
         "apiVersion": "postgresql.cnpg.io/v1", "kind": "Cluster",
         "metadata": {"name": cluster or base, "labels": {"app.kubernetes.io/name": name, "app.kubernetes.io/part-of": app, "app.kubernetes.io/managed-by": "gitops-app"}},
@@ -1324,10 +2252,10 @@ def database_cluster(app: str, name: str, env: str, conf: dict, cluster: str | N
 
 
 def bucket_files(app: str, name: str, env: str, conf: dict, target: bool = False) -> dict[str, dict | str]:
-    """The in-cluster bucket instance (ADR-059): its own SeaweedFS, a Bucket, an identity limited to it and generated keys.
+    """The in-cluster bucket instance (ADR-059): its own SeaweedFS, a Bucket, an identity limited to it and a credentials Job.
 
-    Argo CD never deletes any of it (`Delete=false`, `reclaimPolicy: Retain`). No credential value is rendered: the keys come from
-    External Secrets `Password` generators and are written once to `<system>-<name>-app`."""
+    Argo CD never deletes any of it (`Delete=false`, `reclaimPolicy: Retain`). No credential value is rendered: the PreSync Job writes
+    the keys once to `<system>-<name>-app` (create if absent, otherwise keep); S3Credentials then reads that Secret (spec 128)."""
     n = f"{app}-{name}"
     labels = {"app.kubernetes.io/name": name, "app.kubernetes.io/part-of": app, "app.kubernetes.io/managed-by": "gitops-app"}
     keep = {"argocd.argoproj.io/sync-options": "Delete=false"}
@@ -1337,21 +2265,12 @@ def bucket_files(app: str, name: str, env: str, conf: dict, target: bool = False
         return {"name": obj, "labels": dict(labels), "annotations": ann}
 
     seaweed_api = "seaweed.seaweedfs.com/v1"
-    gen_api = "generators.external-secrets.io/v1alpha1"
     volume = lambda: {"enabled": True, "resources": {"requests": {"storage": "1Gi"}}}  # noqa: E731  (fresh dicts: no YAML anchors)
-
-    def generator(suffix: str, length: int, digits: int) -> dict:
-        return {"apiVersion": gen_api, "kind": "Password", "metadata": meta(f"{n}-{suffix}", "-1"),
-                "spec": {"length": length, "digits": digits, "symbols": 0, "noUpper": False, "allowRepeat": True}}
-
-    def source(suffix: str, key: str) -> dict:
-        return {"sourceRef": {"generatorRef": {"apiVersion": gen_api, "kind": "Password", "name": f"{n}-{suffix}"}},
-                "rewrite": [{"regexp": {"source": "^password$", "target": key}}]}
 
     files: dict[str, dict | str] = {
         "seaweed.yaml": {
             "apiVersion": seaweed_api, "kind": "Seaweed", "metadata": meta(n),
-            "spec": {"image": SEAWEEDFS_IMAGE, "volumeServerDiskCount": 1,
+            "spec": {"image": conf["pin"], "volumeServerDiskCount": 1,
                      "master": {"replicas": 1, "volumeSizeLimitMB": 1024, "persistence": volume()},
                      "volume": {"replicas": 1, "requests": {"storage": conf["storage"]}},
                      "filer": {"replicas": 1, "persistence": volume(), "s3": {"enabled": True},
@@ -1367,23 +2286,526 @@ def bucket_files(app: str, name: str, env: str, conf: dict, target: bool = False
             "spec": {"seaweedRef": {"name": n}, "identityRef": {"name": n},
                      "secretRef": {"name": f"{n}-app", "accessKeyField": "accessKeyId", "secretKeyField": "secretAccessKey"},  # pragma: allowlist secret
                      "reclaimPolicy": "Retain"}},
-        "access-key-generator.yaml": generator("access-key", 20, 5),
-        "secret-key-generator.yaml": generator("secret-key", 40, 10),
-        "externalsecret.yaml": {
-            "apiVersion": ESO_API, "kind": "ExternalSecret", "metadata": meta(f"{n}-app", "-1"),
-            "spec": {"refreshInterval": "0",
-                     "target": {"name": f"{n}-app", "creationPolicy": "Owner", "deletionPolicy": "Retain",
-                                "template": {"engineVersion": "v2", "data": {
-                                    "endpoint": f"http://{n}-filer.{app}-{env}.svc:8333", "bucket": n, "region": "us-east-1",
-                                    "forcePathStyle": "true", "accessKeyId": "{{ .accessKeyId }}",
-                                    "secretAccessKey": "{{ .secretAccessKey }}"}}},  # pragma: allowlist secret
-                     "dataFrom": [source("access-key", "accessKeyId"), source("secret-key", "secretAccessKey")]}},  # pragma: allowlist secret
     }
-    if target:       # the environment's backup target: Velero's store finds the Secret by its labels (AC-117.17)
-        files["externalsecret.yaml"]["spec"]["target"]["template"]["metadata"] = {"labels": dict(labels)}
-    files["kustomization.yaml"] = {"apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": "Kustomization",
-                                   "resources": ["access-key-generator.yaml", "bucket.yaml", "credentials.yaml", "externalsecret.yaml",
-                                                 "identity.yaml", "seaweed.yaml", "secret-key-generator.yaml"]}
+    ns = f"{app}-{env}"
+    plan = {"namespace": ns,
+            "secrets": [{"name": f"{n}-app", "labels": backup_target_labels(app, name) if target else {},   # the environment's backup target: Velero's store finds the Secret by its labels (AC-117.17)
+                         "generate": {"accessKeyId": 20, "secretAccessKey": 40},  # pragma: allowlist secret
+                         "data": {"endpoint": f"http://{n}-filer.{ns}.svc:8333", "bucket": n, "region": "us-east-1", "forcePathStyle": "true"}}],
+            "retire": {"externalSecrets": [f"{n}-app"], "generators": [f"{n}-access-key", f"{n}-secret-key"]}}
+    files.update(credentials_files(app, env, n, labels, plan))
+    files["kustomization.yaml"] = {"apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": "Kustomization", "resources": sorted(files)}
+    return files
+
+
+CREDENTIALS_SCRIPT = r'''# The credentials Job (spec 128): writes each generated credential once (create if absent, otherwise keep what exists),
+# retires the 5.4 ExternalSecrets and Password generators, and restarts a server that refuses the password of its Secret.
+# Standard library only. No value is ever printed.
+import base64
+import json
+import os
+import re
+import secrets
+import socket
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.request
+
+ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+PLACEHOLDER = re.compile(r"\{\{ \.([A-Za-z0-9_]+) \}\}")
+SA_DIR = os.environ.get("CREDENTIALS_SA_DIR", "/var/run/secrets/kubernetes.io/serviceaccount")
+API = os.environ.get("CREDENTIALS_API_URL") or "https://%s:%s" % (
+    os.environ.get("KUBERNETES_SERVICE_HOST", "kubernetes.default.svc"), os.environ.get("KUBERNETES_SERVICE_PORT", "443"))
+RETRY_SECONDS = 60
+
+
+class Fail(Exception):
+    def __init__(self, message, code=1):
+        Exception.__init__(self, message)
+        self.code = code
+
+
+def log(message):
+    print(message, flush=True)
+
+
+with open(os.path.join(SA_DIR, "token")) as handle:
+    TOKEN = handle.read().strip()
+CONTEXT = None
+if API.startswith("https://"):
+    CONTEXT = ssl.create_default_context(cafile=os.path.join(SA_DIR, "ca.crt"))
+
+
+def call(method, path, body=None, content_type="application/json"):
+    """One API request; connection errors, 403, 429 and 5xx are retried with backoff for up to 60 s. Returns (status, object)."""
+    data = None if body is None else json.dumps(body).encode()
+    deadline = time.time() + RETRY_SECONDS
+    delay = 0.5
+    while True:
+        request = urllib.request.Request(API + path, data=data, method=method)
+        request.add_header("Authorization", "Bearer " + TOKEN)
+        request.add_header("Accept", "application/json")
+        if data is not None:
+            request.add_header("Content-Type", content_type)
+        status, raw = None, b""
+        try:
+            with urllib.request.urlopen(request, timeout=30, context=CONTEXT) as response:
+                status, raw = response.status, response.read()
+        except urllib.error.HTTPError as error:
+            status, raw = error.code, error.read()
+        except (urllib.error.URLError, OSError):
+            status = None
+        if status is not None and status != 403 and status != 429 and status < 500:
+            try:
+                return status, (json.loads(raw) if raw else None)
+            except ValueError:
+                return status, None
+        if time.time() + delay > deadline:
+            raise Fail("%s %s: %s" % (method, path, "no answer" if status is None else "status %d" % status))
+        time.sleep(delay)
+        delay = min(delay * 2, 5)
+
+
+def expect(status, wanted, method, path):
+    if status not in wanted:
+        raise Fail("%s %s: unexpected status %d" % (method, path, status))
+
+
+def retire(plan):
+    ns = plan["namespace"]
+    for name in plan.get("retire", {}).get("externalSecrets", []):
+        path = "/apis/external-secrets.io/v1/namespaces/%s/externalsecrets/%s" % (ns, name)
+        status, obj = call("GET", path)
+        if status == 404:
+            continue
+        expect(status, (200,), "GET", path)
+        sources = (obj.get("spec") or {}).get("dataFrom") or []
+        if not any((source.get("sourceRef") or {}).get("generatorRef") for source in sources):
+            raise Fail("ExternalSecret %s is not generator-backed; it writes this Secret, so the credentials Job does not" % name)
+        status, _ = call("DELETE", path, {"apiVersion": "v1", "kind": "DeleteOptions", "propagationPolicy": "Orphan"})
+        if status != 404:
+            expect(status, (200, 202), "DELETE", path)
+        deadline = time.time() + 60
+        while True:
+            status, _ = call("GET", path)
+            if status == 404:
+                break
+            if time.time() > deadline:
+                raise Fail("ExternalSecret %s is still there 60 s after its deletion" % name)
+            time.sleep(0.5)
+        log("retired ExternalSecret " + name)
+    for name in plan.get("retire", {}).get("generators", []):
+        path = "/apis/generators.external-secrets.io/v1alpha1/namespaces/%s/passwords/%s" % (ns, name)
+        status, _ = call("DELETE", path)
+        if status != 404:
+            expect(status, (200, 202), "DELETE", path)
+            log("retired Password generator " + name)
+
+
+def generate(length):
+    return "".join(secrets.choice(ALPHABET) for _ in range(length))
+
+
+def render(value, values):
+    return PLACEHOLDER.sub(lambda match: values[match.group(1)], value)
+
+
+def encode(value):
+    return base64.b64encode(value.encode()).decode()
+
+
+def pointer(key):
+    return key.replace("~", "~0").replace("/", "~1")
+
+
+def build_patch(entry, current):
+    """The JSON patch that keeps every existing value and fixes only metadata and missing keys; returns (ops, added, adopted)."""
+    meta = current["metadata"]
+    ops = [{"op": "test", "path": "/metadata/resourceVersion", "value": meta["resourceVersion"]}]
+    adopted = False
+    declared = entry.get("labels") or {}
+    labels = meta.get("labels")
+    if declared and labels is None:
+        ops.append({"op": "add", "path": "/metadata/labels", "value": dict(declared)})
+        adopted = True
+    else:
+        for key, value in sorted(declared.items()):
+            if (labels or {}).get(key) != value:
+                ops.append({"op": "add", "path": "/metadata/labels/" + pointer(key), "value": value})
+                adopted = True
+    if "app.kubernetes.io/instance" in (labels or {}):
+        ops.append({"op": "remove", "path": "/metadata/labels/app.kubernetes.io~1instance"})
+        adopted = True
+    if "argocd.argoproj.io/tracking-id" in (meta.get("annotations") or {}):
+        ops.append({"op": "remove", "path": "/metadata/annotations/argocd.argoproj.io~1tracking-id"})
+        adopted = True
+    refs = meta.get("ownerReferences") or []
+    kept = [ref for ref in refs if ref.get("kind") != "ExternalSecret"]
+    if len(kept) != len(refs):
+        if kept:
+            ops.append({"op": "replace", "path": "/metadata/ownerReferences", "value": kept})
+        else:
+            ops.append({"op": "remove", "path": "/metadata/ownerReferences"})
+        adopted = True
+    existing = current.get("data")
+    have = dict(existing or {})
+    values = {}
+    for key in entry.get("generate", {}):
+        if key in have:
+            values[key] = base64.b64decode(have[key]).decode()
+    added = []
+    for key, length in sorted(entry.get("generate", {}).items()):
+        if key not in have:
+            values[key] = generate(length)
+            added.append(key)
+    for key, literal in sorted(entry.get("data", {}).items()):
+        if key not in have:
+            added.append(key)
+    if added:
+        new = {}
+        for key in added:
+            if key in entry.get("generate", {}):
+                new[key] = encode(values[key])
+            else:
+                new[key] = encode(render(entry["data"][key], values))
+        if existing is None:
+            ops.append({"op": "add", "path": "/data", "value": new})
+        else:
+            for key in sorted(new):
+                ops.append({"op": "add", "path": "/data/" + pointer(key), "value": new[key]})
+    return ops, sorted(added), adopted
+
+
+def keep(ns, entry):
+    name = entry["name"]
+    path = "/api/v1/namespaces/%s/secrets/%s" % (ns, name)
+    for _ in range(5):
+        status, current = call("GET", path)
+        expect(status, (200,), "GET", path)
+        ops, added, adopted = build_patch(entry, current)
+        if len(ops) == 1:
+            log("kept " + name)
+            return
+        status, _ = call("PATCH", path, ops, "application/json-patch+json")
+        if status in (409, 422):
+            continue
+        expect(status, (200,), "PATCH", path)
+        note = "kept " + name
+        if added:
+            note += "; added keys " + ",".join(added)
+        if adopted:
+            note += "; adopted (metadata)"
+        log(note)
+        return
+    raise Fail("PATCH %s: still conflicting after 5 attempts" % path)
+
+
+def write_secrets(plan):
+    ns = plan["namespace"]
+    for entry in plan["secrets"]:
+        values = {key: generate(length) for key, length in entry.get("generate", {}).items()}
+        data = dict(values)
+        for key, literal in entry.get("data", {}).items():
+            data[key] = render(literal, values)
+        body = {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                "metadata": {"name": entry["name"], "namespace": ns, "labels": entry.get("labels") or {}},
+                "data": {key: encode(value) for key, value in sorted(data.items())}}
+        path = "/api/v1/namespaces/%s/secrets" % ns
+        status, _ = call("POST", path, body)
+        if status == 201:
+            log("created " + entry["name"])
+        elif status == 409:
+            keep(ns, entry)
+        else:
+            expect(status, (201,), "POST", path)
+
+
+def read_line(sock):
+    buf = b""
+    while b"\n" not in buf:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+    return buf
+
+
+def probe_valkey(ip, port, user, password):
+    try:
+        with socket.create_connection((ip, port), timeout=5) as sock:
+            sock.settimeout(5)
+            parts = [b"AUTH", user.encode(), password.encode()]
+            sock.sendall(b"*3\r\n" + b"".join(b"$%d\r\n%s\r\n" % (len(part), part) for part in parts))
+            reply = read_line(sock)
+    except OSError:
+        return "unknown"
+    if reply.startswith(b"+OK"):
+        return "accepted"
+    if reply.startswith(b"-WRONGPASS"):
+        return "refused"
+    return "unknown"
+
+
+def probe_nats(ip, port, user, password):
+    try:
+        with socket.create_connection((ip, port), timeout=5) as sock:
+            sock.settimeout(5)
+            info = read_line(sock)
+            if b'"tls_required":true' in info.replace(b" ", b""):
+                return "unknown"
+            options = {"verbose": False, "pedantic": False, "user": user, "pass": password, "name": "credentials-check",
+                       "lang": "python", "version": "1", "protocol": 1}
+            sock.sendall(b"CONNECT " + json.dumps(options).encode() + b"\r\nPING\r\n")
+            buf = b""
+            while b"PONG" not in buf and b"-ERR" not in buf:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+    except OSError:
+        return "unknown"
+    if b"PONG" in buf:
+        return "accepted"
+    if b"Authorization Violation" in buf:
+        return "refused"
+    return "unknown"
+
+
+def ready(pod):
+    conditions = (pod.get("status") or {}).get("conditions") or []
+    return any(c.get("type") == "Ready" and c.get("status") == "True" for c in conditions)
+
+
+def get_pod(ns, name):
+    path = "/api/v1/namespaces/%s/pods/%s" % (ns, name)
+    status, pod = call("GET", path)
+    if status == 404:
+        return None
+    expect(status, (200,), "GET", path)
+    return pod
+
+
+def secret_value(ns, name, key):
+    path = "/api/v1/namespaces/%s/secrets/%s" % (ns, name)
+    status, obj = call("GET", path)
+    expect(status, (200,), "GET", path)
+    return base64.b64decode((obj.get("data") or {})[key]).decode()
+
+
+def declared_users(pod, users):
+    """The users whose password variable this pod declares from the planned Secret."""
+    found = []
+    for user in users:
+        for container in (pod.get("spec") or {}).get("containers") or []:
+            for var in container.get("env") or []:
+                ref = (var.get("valueFrom") or {}).get("secretKeyRef") or {}
+                if var.get("name") == user["env"] and ref.get("name") == user["secret"]:
+                    found.append(user)
+    return found
+
+
+def probe_pod(ns, verify, pod, users):
+    probe = probe_valkey if verify["engine"] == "valkey" else probe_nats
+    states = []
+    for user in users:
+        password = secret_value(ns, user["secret"], user["key"])
+        states.append((user, probe(pod["status"]["podIP"], verify["port"], user["user"], password)))
+    return states
+
+
+def verify_servers(plan):
+    verify = plan.get("verify")
+    if not verify:
+        return
+    ns = plan["namespace"]
+    checked = {}
+    refused = {}
+    for name in verify["pods"]:
+        pod = get_pod(ns, name)
+        if pod is None:
+            log("skipped %s: no such pod" % name)
+        elif not ready(pod):
+            log("skipped %s: not ready" % name)
+        elif not (pod.get("status") or {}).get("podIP"):
+            log("skipped %s: no pod IP" % name)
+        else:
+            users = declared_users(pod, verify["users"])
+            states = probe_pod(ns, verify, pod, users)
+            checked[name] = (pod, users)
+            bad = [user for user, state in states if state == "refused"]
+            if bad:
+                refused[name] = bad
+            elif states and all(state == "accepted" for _, state in states):
+                log("verified " + name)
+            elif states:
+                log("skipped %s: could not check every password" % name)
+    for name, bad in sorted(refused.items()):
+        path = "/api/v1/namespaces/%s/pods/%s" % (ns, name)
+        status, _ = call("DELETE", path)
+        expect(status, (200, 202, 404), "DELETE", path)
+        for user in bad:
+            log("restarted %s: it refused the password of %s" % (name, user["secret"]))
+    for name, bad in sorted(refused.items()):
+        old_uid = checked[name][0]["metadata"]["uid"]
+        deadline = time.time() + 120
+        fresh = None
+        while time.time() < deadline:
+            pod = get_pod(ns, name)
+            if pod and pod["metadata"]["uid"] != old_uid and ready(pod) and (pod.get("status") or {}).get("podIP"):
+                fresh = pod
+                break
+            time.sleep(2)
+        if fresh is None:
+            log("skipped %s: not ready 120 s after the restart" % name)
+            continue
+        states = probe_pod(ns, verify, fresh, checked[name][1])
+        again = [user for user, state in states if state == "refused"]
+        if again:
+            for user in again:
+                log("%s still refuses the password of %s after a restart" % (name, user["secret"]))
+            raise Fail("a server still refuses a password after its restart", 2)
+        log("verified " + name)
+
+
+def main():
+    with open(sys.argv[1]) as handle:
+        plan = json.load(handle)
+    retire(plan)
+    write_secrets(plan)
+    verify_servers(plan)
+
+
+try:
+    main()
+except Fail as failure:
+    log(str(failure))
+    sys.exit(failure.code)
+'''
+
+
+def credentials_pod_labels(owner: str, labels: dict) -> dict:
+    """The labels of a credentials Job's pod: part-of and managed-by of the owner, and its own name and component. None of the owner's
+    selector labels (app, app.kubernetes.io/name), so no Service, Deployment or StatefulSet of the owner selects the Job's pod."""
+    kept = {k: v for k, v in labels.items() if k in ("app.kubernetes.io/part-of", "app.kubernetes.io/managed-by")}
+    return {"app.kubernetes.io/name": f"{owner}-credentials", **kept, "app.kubernetes.io/component": "credentials"}
+
+
+def credentials_files(app: str, env: str, owner: str, labels: dict, plan: dict) -> dict[str, dict]:
+    """The five objects of an owner's credentials Job (spec 128): they write each generated credential once, in the PreSync hook.
+
+    `owner` is `<system>-<name>` of a resource instance or a component's name. The Job's name carries a hash of the plan, the program and
+    the image, so a changed plan runs again and an unchanged one never does."""
+    ns = f"{app}-{env}"
+    plan_text = json.dumps(plan, indent=2, sort_keys=True)
+    digest = hashlib.sha256((plan_text + CREDENTIALS_SCRIPT + CREDENTIALS_IMAGE).encode()).hexdigest()[:8]
+    name = f"{owner}-credentials"
+    planned = sorted(s["name"] for s in plan["secrets"])
+    retire = plan.get("retire", {})
+    pods = sorted(plan.get("verify", {}).get("pods", []))
+    rules: list[dict] = [{"apiGroups": [""], "resources": ["secrets"], "verbs": ["create"]}]
+    for group, resource, names, verbs in (("", "secrets", planned, ["get", "patch"]),
+                                          ("external-secrets.io", "externalsecrets", sorted(retire.get("externalSecrets", [])), ["get", "delete"]),
+                                          ("generators.external-secrets.io", "passwords", sorted(retire.get("generators", [])), ["delete"]),
+                                          ("", "pods", pods, ["get", "delete"])):
+        if names:
+            rules.append({"apiGroups": [group], "resources": [resource], "resourceNames": names, "verbs": verbs})
+
+    def meta(object_name: str, wave: str, policy: str) -> dict:
+        return {"name": object_name, "labels": dict(labels),
+                "annotations": {"argocd.argoproj.io/hook": "PreSync", "argocd.argoproj.io/sync-wave": wave,
+                                "argocd.argoproj.io/hook-delete-policy": policy}}
+
+    job_security = {"runAsNonRoot": True, "runAsUser": 65534, "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
+                    "capabilities": {"drop": ["ALL"]}}
+    return {
+        "credentials-serviceaccount.yaml": {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": meta(name, "0", "BeforeHookCreation")},
+        "credentials-role.yaml": {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role", "metadata": meta(name, "0", "BeforeHookCreation"),
+                                  "rules": rules},
+        "credentials-rolebinding.yaml": {
+            "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": meta(name, "0", "BeforeHookCreation"),
+            "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": name},
+            "subjects": [{"kind": "ServiceAccount", "name": name, "namespace": ns}]},
+        "credentials-configmap.yaml": {"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta(name, "0", "BeforeHookCreation"),
+                                       "data": {"create.py": CREDENTIALS_SCRIPT, "plan.json": plan_text}},
+        "credentials-job.yaml": {
+            "apiVersion": "batch/v1", "kind": "Job",
+            "metadata": meta(f"{owner[:42].rstrip('-')}-credentials-{digest}", "1", "BeforeHookCreation,HookSucceeded"),
+            "spec": {"backoffLimit": 2, "activeDeadlineSeconds": 300, "ttlSecondsAfterFinished": 600,
+                     # the pod must not match any workload's selector (a Service would send it traffic): only these labels
+                     "template": {"metadata": {"labels": credentials_pod_labels(owner, labels)},
+                                  "spec": {"serviceAccountName": name, "automountServiceAccountToken": True, "restartPolicy": "Never",
+                                           "securityContext": {"runAsNonRoot": True, "runAsUser": 65534, "runAsGroup": 65534,
+                                                               "seccompProfile": {"type": "RuntimeDefault"}},
+                                           "containers": [{"name": "credentials", "image": CREDENTIALS_IMAGE,
+                                                           "command": ["python3", "/credentials/create.py", "/credentials/plan.json"],
+                                                           "env": [{"name": "PYTHONDONTWRITEBYTECODE", "value": "1"}],
+                                                           "resources": {"requests": {"cpu": "10m", "memory": "32Mi"}, "limits": {"memory": "64Mi"}},
+                                                           "securityContext": job_security,
+                                                           "volumeMounts": [{"name": "credentials", "mountPath": "/credentials", "readOnly": True}]}],
+                                           "volumes": [{"name": "credentials", "configMap": {"name": name}}]}}}},
+    }
+
+
+def cache_files(app: str, name: str, env: str, conf: dict) -> dict[str, dict | str]:
+    """The in-cluster cache instance (ADR-064): one Valkey StatefulSet, a ClusterIP Service and a credentials Job (spec 128).
+
+    Every object carries `app.kubernetes.io/name: <name>`, so spec 117's Velero Schedule leaves all of it out. No secret value is
+    rendered: the Job writes the password once to `<system>-<name>-app` (create if absent, otherwise keep) and restarts a server that
+    refuses it."""
+    n, ns = f"{app}-{name}", f"{app}-{env}"
+    labels = lambda: {"app.kubernetes.io/name": name, "app.kubernetes.io/part-of": app, "app.kubernetes.io/managed-by": "gitops-app"}  # noqa: E731
+    selector = lambda: {"app.kubernetes.io/name": name, "app.kubernetes.io/part-of": app}  # noqa: E731
+    persistent = conf["persistence"]
+    args = ["--port", "6379", "--requirepass", "$(VALKEY_PASSWORD)", "--maxmemory", str(conf["maxmemory"]),
+            "--maxmemory-policy", conf["maxmemoryPolicy"], "--save", "", "--dir", "/data",
+            "--appendonly", "yes" if persistent else "no"]
+    if persistent:
+        args += ["--appendfsync", "everysec"]
+    memory = str(conf["memory"])
+    container: dict = {
+        "name": "valkey", "image": conf["pin"], "command": ["valkey-server"], "args": args,
+        "env": [{"name": "VALKEY_PASSWORD", "valueFrom": {"secretKeyRef": {"name": f"{n}-app", "key": "password"}}}],  # pragma: allowlist secret
+        "ports": [{"name": "redis", "containerPort": 6379}],
+        "resources": {"requests": {"cpu": "50m", "memory": memory}, "limits": {"memory": memory}},
+        "readinessProbe": {"exec": {"command": ["sh", "-c", 'valkey-cli --no-auth-warning -a "$VALKEY_PASSWORD" ping | grep -q PONG']},
+                           "periodSeconds": 5},
+        "livenessProbe": {"tcpSocket": {"port": "redis"}, "initialDelaySeconds": 10, "periodSeconds": 10},
+        "securityContext": {"runAsNonRoot": True, "runAsUser": 999, "allowPrivilegeEscalation": False,
+                            "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}},
+    }
+    spec: dict = {
+        "replicas": 1, "serviceName": n, "selector": {"matchLabels": selector()},
+        "template": {"metadata": {"labels": labels()},
+                     "spec": {"automountServiceAccountToken": False,
+                              "securityContext": {"runAsNonRoot": True, "runAsUser": 999, "runAsGroup": 999, "fsGroup": 999,
+                                                  "seccompProfile": {"type": "RuntimeDefault"}},
+                              "containers": [container]}},
+    }
+    if persistent:
+        container["volumeMounts"] = [{"name": "data", "mountPath": "/data"}]
+        spec["volumeClaimTemplates"] = [{"metadata": {"name": "data", "labels": labels()},
+                                         "spec": {"accessModes": ["ReadWriteOnce"],
+                                                  "resources": {"requests": {"storage": conf["storage"]}}}}]
+    files: dict[str, dict | str] = {
+        "service.yaml": {
+            "apiVersion": "v1", "kind": "Service", "metadata": {"name": n, "labels": labels()},
+            "spec": {"type": "ClusterIP", "selector": selector(),
+                     "ports": [{"name": "redis", "port": 6379, "targetPort": "redis"}]}},
+        "statefulset.yaml": {
+            "apiVersion": "apps/v1", "kind": "StatefulSet",
+            "metadata": {"name": n, "labels": labels()},
+            "spec": spec},
+    }
+    plan = {"namespace": ns,
+            "secrets": [{"name": f"{n}-app", "labels": labels(), "generate": {"password": 32},
+                         "data": {"url": "redis://default:{{ .password }}@" + f"{n}.{ns}.svc:6379/0", "host": f"{n}.{ns}.svc", "port": "6379"}}],
+            "retire": {"externalSecrets": [f"{n}-app"], "generators": [f"{n}-password"]},
+            "verify": {"engine": "valkey", "port": 6379, "pods": [f"{n}-0"],
+                       "users": [{"secret": f"{n}-app", "key": "password", "user": "default", "env": "VALKEY_PASSWORD"}]}}
+    files.update(credentials_files(app, env, n, labels(), plan))
+    files["kustomization.yaml"] = {"apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": "Kustomization", "resources": sorted(files)}
     return files
 
 
@@ -1508,20 +2930,113 @@ def observability_files(app: str, env: str, conf: dict, services: list[dict]) ->
     }
 
 
-def addon_files(app: str, name: str, env: str, cfg: dict, services: list[dict], app_dir: Path | None = None) -> dict[str, dict | str]:
+def broker_files(app: str, name: str, env: str, cfg: dict, services: list[dict], server: str) -> dict[str, dict | str]:
+    """The in-cluster broker instance (ADR-065): the NATS server as a nested Argo CD Application of the official chart, a credentials
+    Job (spec 128) that writes the user passwords once, and the NACK Account, Streams and Consumers. Nothing secret is rendered; streams and consumers are never deleted by a sync."""
+    conf = cfg["resources"][name]["envs"][env]
+    n, ns = f"{app}-{name}", f"{app}-{env}"
+    url = f"nats://{n}.{ns}.svc:4222"
+    labels = lambda: {"app.kubernetes.io/name": name, "app.kubernetes.io/part-of": app, "app.kubernetes.io/managed-by": "gitops-app"}  # noqa: E731
+    wave = lambda w: {"argocd.argoproj.io/sync-wave": w}  # noqa: E731
+    events = {a: e for a, e in cfg["events"].items() if e["broker"] == name}
+    users = [s for s in services if env in envs_of(s) and any(a in events for a in [*s["provides"], *s["consumes"]])]
+    secret_env = lambda c: c.upper().replace("-", "_")  # noqa: E731
+
+    files: dict[str, dict | str] = {}
+    secrets_plan = [{"name": f"{n}-nack", "labels": labels(), "generate": {"password": 32}, "data": {"user": "_nack"}}]  # pragma: allowlist secret
+    verify_users = [{"secret": f"{n}-nack", "key": "password", "user": "_nack", "env": "ADMIN_PASSWORD"}]  # pragma: allowlist secret
+    auth = [{"user": "_nack", "password": "<< $ADMIN_PASSWORD >>"}]  # pragma: allowlist secret
+    cenv: dict = {"ADMIN_PASSWORD": {"valueFrom": {"secretKeyRef": {"name": f"{n}-nack", "key": "password"}}}}  # pragma: allowlist secret
+    for s in users:
+        c = s["name"]
+        secrets_plan.append({"name": f"{n}-{c}-app", "labels": labels(), "generate": {"password": 32},  # pragma: allowlist secret
+                             "data": {"url": url, "user": c}})
+        verify_users.append({"secret": f"{n}-{c}-app", "key": "password", "user": c, "env": f"USER_{secret_env(c)}_PASSWORD"})  # pragma: allowlist secret
+        publish = [f"{app}.{a}.>" for a in events if a in s["provides"]]
+        for a in events:
+            if a in s["consumes"]:
+                st = f"{app}-{a}"
+                publish += [f"$JS.API.CONSUMER.INFO.{st}.{c}", f"$JS.API.CONSUMER.MSG.NEXT.{st}.{c}", f"$JS.ACK.{st}.{c}.>", f"$JS.ACK.*.*.{st}.{c}.>"]
+        auth.append({"user": c, "password": f"<< $USER_{secret_env(c)}_PASSWORD >>",  # pragma: allowlist secret
+                     "permissions": {"publish": {"allow": publish}, "subscribe": {"allow": [f"_INBOX.{c}.>"]}}})
+        cenv[f"USER_{secret_env(c)}_PASSWORD"] = {"valueFrom": {"secretKeyRef": {"name": f"{n}-{c}-app", "key": "password"}}}  # pragma: allowlist secret
+    sec = lambda: {"runAsNonRoot": True, "runAsUser": 1000, "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,  # noqa: E731
+                   "capabilities": {"drop": ["ALL"]}}
+    image, _, digest = conf["pin"].partition("@")
+    repository, tag = image.rsplit(":", 1)
+    tag = f"{tag}@{digest}" if digest else tag
+    replicas = conf["replicas"]
+    files["server.yaml"] = {
+        "apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+        "metadata": {"name": f"{app}-{name}-{env}-nats", "namespace": "argocd", "labels": labels()},
+        "spec": {"project": "default",
+                 "source": {"repoURL": NATS_CHART["repo_url"], "chart": NATS_CHART["chart"], "targetRevision": conf["chart_version"],
+                            "helm": {"releaseName": n, "valuesObject": {
+                                "nameOverride": name, "fullnameOverride": n,
+                                "global": {"labels": {"app.kubernetes.io/part-of": app}},
+                                "config": {"cluster": {"enabled": True, "replicas": 3} if replicas == 3 else {"enabled": False},
+                                           "jetstream": {"enabled": True, "fileStore": {"enabled": True, "pvc": {"enabled": True, "size": conf["storage"]}},
+                                                         "memoryStore": {"enabled": False}},
+                                           "monitor": {"enabled": True, "port": 8222},
+                                           "merge": {"authorization": {"users": auth}}},
+                                "container": {"image": {"repository": repository, "tag": tag}, "env": cenv,
+                                              "merge": {"resources": conf["resources"] or BROKER_DEFAULT_RESOURCES, "securityContext": sec()}},
+                                "reloader": {"enabled": True, "merge": {"securityContext": sec()}},
+                                "podTemplate": {"merge": {"spec": {"automountServiceAccountToken": False,
+                                                                   "securityContext": {"runAsNonRoot": True, "runAsUser": 1000, "runAsGroup": 1000,
+                                                                                       "fsGroup": 1000, "seccompProfile": {"type": "RuntimeDefault"}}}}},
+                                "service": {"ports": {"monitor": {"enabled": True}}},
+                                "natsBox": {"enabled": False}}}},
+                 "destination": {"server": server, "namespace": ns},
+                 "syncPolicy": {"automated": {"prune": True, "selfHeal": True}}}}
+    files["account.yaml"] = {
+        "apiVersion": "jetstream.nats.io/v1beta2", "kind": "Account",
+        "metadata": {"name": n, "labels": labels(),
+                     "annotations": {**wave("1"), "argocd.argoproj.io/sync-options": "SkipDryRunOnMissingResource=true"}},
+        "spec": {"name": n, "servers": [url], "user": {"secret": {"name": f"{n}-nack"}, "user": "user", "password": "password"}}}  # pragma: allowlist secret
+    keep = {"argocd.argoproj.io/sync-options": "Delete=false,SkipDryRunOnMissingResource=true",
+            "argocd.argoproj.io/compare-options": "IgnoreExtraneous"}
+    for a, e in events.items():
+        st = f"{app}-{a}"
+        files[f"stream-{a}.yaml"] = {
+            "apiVersion": "jetstream.nats.io/v1beta2", "kind": "Stream",
+            "metadata": {"name": st, "labels": labels(), "annotations": {**wave("2"), **keep}},
+            "spec": {"name": st, "subjects": [f"{app}.{a}.>"], "storage": "file", "replicas": replicas, "retention": "limits",
+                     "discard": "old", "maxAge": "168h", "account": n, "preventDelete": True}}
+        for s in users:
+            if a in s["consumes"]:
+                c = s["name"]
+                files[f"consumer-{a}.{c}.yaml"] = {
+                    "apiVersion": "jetstream.nats.io/v1beta2", "kind": "Consumer",
+                    "metadata": {"name": f"{st}.{c}", "labels": labels(), "annotations": {**wave("3"), **keep}},
+                    "spec": {"streamName": st, "durableName": c, "deliverPolicy": "all", "ackPolicy": "explicit", "ackWait": "30s",
+                             "maxDeliver": -1, "account": n, "preventDelete": True}}
+    plan = {"namespace": ns, "secrets": secrets_plan, "retire": {"externalSecrets": [x["name"] for x in secrets_plan], "generators": [f"{n}-password"]},
+            "verify": {"engine": "nats", "port": 4222, "pods": [f"{n}-{i}" for i in range(replicas)], "users": verify_users}}
+    files.update(credentials_files(app, env, n, labels(), plan))
+    files["kustomization.yaml"] = {"apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": "Kustomization", "resources": sorted(files)}
+    return files
+
+
+def addon_files(app: str, name: str, env: str, cfg: dict, services: list[dict], app_dir: Path | None = None,
+                server: str = "https://kubernetes.default.svc") -> dict[str, dict | str]:
     if name == "observability":
         return observability_files(app, env, cfg["observability"][env], services)
     res = cfg["resources"][name]
     if res["type"] == "bucket":
         return bucket_files(app, name, env, res["envs"][env], is_backup_target(cfg, env, name))
-    conf = res["envs"][env]            # database; cache and broker are not built yet
+    if res["type"] == "cache":
+        return cache_files(app, name, env, res["envs"][env])
+    if res["type"] == "broker":
+        return broker_files(app, name, env, cfg, services, server)
+    conf = res["envs"][env]            # database
     backup = conf.get("backup")
     base = f"{app}-{name}"
-    clusters = read_restore_state(app_dir, env, name) if app_dir is not None else [{"name": base, "role": "active"}]
+    clusters, archives = read_restore_state(app_dir, env, name) if app_dir is not None else ([{"name": base, "role": "active"}], [])
     files: dict[str, dict | str] = {}
     for c in clusters:
         fname = "cluster.yaml" if c["name"] == base else f"cluster-g{c['name'][len(base) + 2:]}.yaml"
-        files[fname] = database_cluster(app, name, env, conf, c["name"], c["role"], c.get("from"), bool(backup))
+        files[fname] = database_cluster(app, name, env, conf, c["name"], c["role"], c.get("from"), bool(backup), archives, c.get("archive") if c["role"] == "previous" else None)
     if backup:
         labels = {"app.kubernetes.io/name": name, "app.kubernetes.io/part-of": app, "app.kubernetes.io/managed-by": "gitops-app"}
         bucket, endpoint, secret = backup_target(app, env, cfg, backup["to"])
@@ -1551,6 +3066,14 @@ def render_app(app_dir: Path, ans: dict) -> dict[Path, str]:
 
     docs = []
     for env in ENVS:
+        scaled = scaled_instances(services, env)
+        comp_sync: dict = {"automated": {"prune": True, "selfHeal": True}, "syncOptions": ["CreateNamespace=true"]}
+        if scaled:
+            comp_sync["syncOptions"].append("RespectIgnoreDifferences=true")
+            if cfg["autoscaling"][env] == "keda":
+                comp_sync["retry"] = RETRY      # a ScaledObject may sync before KEDA's CRD exists
+        if any(env in envs_of(s) and "external" not in s and any(x.get("generate") for x in s.get("secrets") or []) for s in services):
+            comp_sync["retry"] = RETRY      # a PreSync credentials Job may fail once
         docs.append({
             "apiVersion": "argoproj.io/v1alpha1", "kind": "ApplicationSet",
             "metadata": {"name": f"{app}-{env}", "namespace": "argocd"},
@@ -1562,7 +3085,9 @@ def render_app(app_dir: Path, ans: dict) -> dict[Path, str]:
                         "project": "default",
                         "source": {"repoURL": gitops_repo, "targetRevision": "main", "path": f"applications/{app}/overlays/{env}/" + "{{name}}"},
                         "destination": {"server": server, "namespace": f"{app}-{env}"},
-                        "syncPolicy": {"automated": {"prune": True, "selfHeal": True}, "syncOptions": ["CreateNamespace=true"]},
+                        "syncPolicy": comp_sync,
+                        **({"ignoreDifferences": [{"group": "apps", "kind": "Deployment", "name": n, "jsonPointers": ["/spec/replicas"]}
+                                                  for n in scaled]} if scaled else {}),
                     },
                 },
                 **({"preservedFields": PRESERVED_FIELDS} if env in cfg["backup"] else {}),
@@ -1580,6 +3105,8 @@ def render_app(app_dir: Path, ans: dict) -> dict[Path, str]:
             sync = {"automated": {"prune": prune, "selfHeal": True}, "syncOptions": ["CreateNamespace=true"]}
             if any(cfg["resources"].get(n, {}).get("envs", {}).get(env, {}).get("backup") for n in group):
                 sync["retry"] = RETRY       # an ObjectStore may sync before its CRD exists
+            elif any(cfg["resources"].get(n, {}).get("type") in ("bucket", "cache", "broker") for n in group):
+                sync["retry"] = RETRY       # the Account, streams and consumers wait for NACK and the server; a PreSync credentials Job may fail once
             docs.append({
                 "apiVersion": "argoproj.io/v1alpha1", "kind": "ApplicationSet",
                 "metadata": {"name": f"{app}-{suffix}-{env}", "namespace": "argocd"},
@@ -1598,7 +3125,7 @@ def render_app(app_dir: Path, ans: dict) -> dict[Path, str]:
                 },
             })
         for n in names:
-            for fname, doc in addon_files(app, n, env, cfg, services, app_dir).items():
+            for fname, doc in addon_files(app, n, env, cfg, services, app_dir, server).items():
                 out[app_dir / "addons" / env / n / fname] = dump(doc) if not isinstance(doc, str) else doc
     for env in policy_envs(services, cfg):
         docs.append({
@@ -1656,6 +3183,8 @@ def render_app(app_dir: Path, ans: dict) -> dict[Path, str]:
 
     for env in ENVS:
         ext_secrets = external_secrets(app, env, services, cfg)
+        for comp_name, extra in broker_secrets(app, env, services, cfg).items():
+            ext_secrets.setdefault(comp_name, {}).update(extra)
         for comp in services:
             if env not in envs_of(comp):
                 continue
@@ -1666,10 +3195,11 @@ def render_app(app_dir: Path, ans: dict) -> dict[Path, str]:
                 for fname, doc in external_files(app, s, env, tag, server).items():
                     out[base / fname] = dump(doc)
                 continue
-            files = {"deployment.yaml": deployment(app, s, env, env in cfg["observability"], cfg["resources"]), "service.yaml": service(app, s)}
+            files = {"deployment.yaml": deployment(app, s, env, env in cfg["observability"], cfg["resources"], cfg["events"]), "service.yaml": service(app, s)}
             route = httproute(app, s, env, cfg)
             if route:
                 files["httproute.yaml"] = route
+            files.update(autoscaler_files(app, s, env, cfg))
             files.update(secret_manifests(app, s, env, cfg))
             files.update(ext_secrets.get(s["name"], {}))
             for fname, doc in files.items():
@@ -1679,6 +3209,8 @@ def render_app(app_dir: Path, ans: dict) -> dict[Path, str]:
                 "apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": "Kustomization",
                 "resources": sorted(files), "images": [{"name": s["image"], "newTag": tag}],
             })
+    if system["autonomy"] is not None:
+        out[app_dir / "autonomy.json"] = system["autonomy"]
     return out
 
 
@@ -1686,7 +3218,10 @@ def operator_application(name: str, server: str) -> dict:
     """The Argo CD application of one operator of the versions table (ADR-058); system and cluster repos render the same one."""
     op = OPERATORS[name]
     meta = {"name": f"operator-{name}", "namespace": "argocd",
-            "labels": {"app.kubernetes.io/managed-by": "gitops-app", "app.kubernetes.io/component": "operator"}}
+            "labels": {"app.kubernetes.io/managed-by": "gitops-app", "app.kubernetes.io/component": "operator"},
+            # the API server drops the empty annotations/labels maps some charts render on their CRDs (kyverno); the default
+            # client-side diff then reports them OutOfSync forever (#261). The server-side diff compares what was applied.
+            "annotations": {"argocd.argoproj.io/compare-options": "ServerSideDiff=true"}}
     if op.get("finalizer"):  # spec 117: velero leaves the cluster with its resources
         meta["finalizers"] = ["resources-finalizer.argocd.argoproj.io"]
     helm = {"releaseName": op["release"], **({"valuesObject": op["values"]} if "values" in op else {})}
@@ -1715,6 +3250,16 @@ def operator_files(apps: list[Path], ans: dict) -> dict[Path, str]:
                     needed |= {"plugin-barman-cloud", "cert-manager"}
         if any(env not in owned for env in system["cfg"]["backup"]):
             needed.add("velero")
+        for env, kind in system["cfg"]["autoscaling"].items():
+            if env not in owned and kind == "keda":
+                needed.add("keda")
+        if ans.get("resource_metrics", "provided") == "install":
+            for s in system["services"]:
+                if "external" not in s and any(e not in owned and s["_eff"][e].get("scale") and s["_eff"][e]["scale"]["trigger"] in ("cpu", "memory")
+                                               for e in s["environments"]):
+                    needed.add("metrics-server")
+        if ans.get("property_operators", "owner") == "install":      # AC-121.17: a missing answer reads as owner
+            needed |= property_operators(system, owned)
     if not needed:
         return {}
     server = ans.get("cluster_server", "https://kubernetes.default.svc")
@@ -1732,12 +3277,151 @@ def operator_files(apps: list[Path], ans: dict) -> dict[Path, str]:
         if name not in needed:
             continue
         files[base / "apps" / f"{name}.yaml"] = dump(operator_application(name, server))
+    if "lgtm" in needed:
+        files[base / "apps" / "lgtm.yaml"] = dump(lgtm_application(repo, server))
+        for fname, doc in lgtm_manifests().items():
+            files[base / "lgtm" / fname] = dump(doc)
     return files
+
+
+def property_operators(system: dict, owned: dict) -> set[str]:
+    """External Secrets, Kyverno and LGTM for the environments that are not owned (AC-121.17); only with `property_operators: install`."""
+    needed: set[str] = set()
+    cfg = system["cfg"]
+    for env in ENVS:
+        if env in owned:
+            continue
+        running = [s for s in system["services"] if env in envs_of(s)]
+        if not running:
+            continue
+        comps = [s for s in running if "external" not in s]
+        if (any(at(s, env).get("secrets") or at(s, env).get("secretRefs") for s in comps)
+                or any(e == env and (ext or typ in ("bucket", "cache", "broker")) for _, e, typ, ext in resource_instances(system))
+                or cfg["backup"].get(env)):
+            needed.add("external-secrets")
+        if cfg["policy"][env] != "Off":
+            needed.add("kyverno")
+        if (cfg["observability"].get(env) or {}).get("ui") == "lgtm":
+            needed.add("lgtm")
+    return needed
+
+
+def lgtm_application(repo: str, server: str) -> dict:
+    """The dev Grafana stack as an Argo CD application over plain manifests in operators/lgtm/ (not a chart; no finalizer)."""
+    return {
+        "apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+        "metadata": {"name": "operator-lgtm", "namespace": "argocd",
+                     "labels": {"app.kubernetes.io/managed-by": "gitops-app", "app.kubernetes.io/component": "operator"}},
+        "spec": {"project": "default", "source": {"repoURL": repo, "targetRevision": "main", "path": "operators/lgtm"},
+                 "destination": {"server": server, "namespace": "observability"},
+                 "syncPolicy": {"automated": {"prune": True, "selfHeal": True}, "syncOptions": ["CreateNamespace=true", "ServerSideApply=true"]}}}
+
+
+def lgtm_manifests() -> dict[str, dict]:
+    """deployment.yaml, service.yaml and kustomization.yaml of operators/lgtm/, as local-cluster.sh applies them (no dashboards, no route)."""
+    ports = [("grafana", 3000), ("otlp-grpc", 4317), ("otlp-http", 4318), ("prometheus", 9090)]
+    return {
+        "deployment.yaml": {
+            "apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "lgtm", "namespace": "observability", "labels": {"app": "lgtm"}},
+            "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "lgtm"}},
+                     "template": {"metadata": {"labels": {"app": "lgtm"}}, "spec": {"containers": [{
+                         "name": "lgtm", "image": LGTM_IMAGE, "ports": [{"name": n, "containerPort": p} for n, p in ports],
+                         "readinessProbe": {"httpGet": {"path": "/api/health", "port": "grafana"}, "initialDelaySeconds": 20, "periodSeconds": 5},
+                         "resources": {"requests": {"cpu": "200m", "memory": "512Mi"}, "limits": {"memory": "2Gi"}}}]}}}},
+        "service.yaml": {
+            "apiVersion": "v1", "kind": "Service", "metadata": {"name": "lgtm", "namespace": "observability"},
+            "spec": {"selector": {"app": "lgtm"}, "ports": [{"name": n, "port": p, "targetPort": n} for n, p in ports]}},
+        "kustomization.yaml": {"apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": "Kustomization", "resources": ["deployment.yaml", "service.yaml"]},
+    }
+
+
+BROKER_STALE = re.compile(r"^(stream-.+|consumer-.+|externalsecret-.+)\.yaml$")     # broker files that are no longer rendered (spec 119)
+CREDENTIALS_STALE = re.compile(r"^(externalsecret|password-generator|access-key-generator|secret-key-generator|nack-secret)\.yaml$|^credentials-.+\.yaml$")   # spec 128: files of the 5.4 generators
+
+UNBOUND_NOTE = "note: applications/{app}: events API {api} is carried by no broker yet: add one with /resource:add <name> --type broker"
+
+
+def render_notes(app_dir: Path) -> tuple[list[str], list[str]]:
+    """(unbound events API notes, external broker notes) of one system (design.md, render notes)."""
+    system = load_system(app_dir)
+    app, services, cfg = app_dir.name, system["services"], system["cfg"]
+    unbound = [UNBOUND_NOTE.format(app=app, api=a) for a, e in cfg["events"].items() if e["broker"] is None]
+    external: list[str] = []
+    for name, rc in cfg["resources"].items():
+        if rc["type"] != "broker":
+            continue
+        for env in ENVS:
+            if not rc["envs"][env]["external"]:
+                continue
+            apis = {a: e for a, e in cfg["events"].items() if e["broker"] == name}
+            if not any(env in envs_of(s) and any(a in apis for a in [*s["provides"], *s["consumes"]]) for s in services):
+                continue
+            running = {s["name"] for s in services if env in envs_of(s)}
+            for a, e in apis.items():
+                consumers = [c for c in e["consumers"] if c in running]
+                extra = f" with the durable consumers {', '.join(consumers)} (pull, explicit ack, ack wait 30s)" if consumers else ""
+                external.append(f"note: applications/{app}: broker {name} is external in {env}: create stream {app}-{a} "
+                                f"(subjects {app}.{a}.>, file storage, max age 7d){extra}; the platform creates none on an external broker")
+    return unbound, external
+
+
+def archive_notes(app_dir: Path) -> list[str]:
+    """A database whose active generation runs on another major than the instance's (restored from before an upgrade, spec 121)."""
+    system = load_system(app_dir)
+    app, notes = app_dir.name, []
+    for name, rc in system["cfg"]["resources"].items():
+        if rc["type"] != "database":
+            continue
+        for env in ENVS:
+            conf = rc["envs"][env]
+            if conf["external"]:
+                continue
+            clusters, archives = read_restore_state(app_dir, env, name)
+            active = next(c for c in clusters if c["role"] == "active")
+            frm = active.get("from") or {}
+            major = next((a["major"] for a in archives if a["server"] == frm.get("server")), archives[0]["major"] if archives and frm else conf["version"])
+            if stepped_since(archives, active["name"], conf["version"]):
+                major = conf["version"]      # a major step since the switch: the active generation runs the effective major
+            if major != conf["version"]:
+                notes.append(f"note: applications/{app}: {name} in {env} runs {active['name']} on {major} (restored from before the upgrade to "
+                             f"{conf['version']}); "
+                             + (f"discard the previous instance (/resource:restore {name} --env {env} --discard), "
+                                if any(c["role"] in ("previous", "restored") for c in clusters) else "")
+                             + f"set resources.{name}.instances.{env}.version: {major}, "
+                             f"then /resource:upgrade {name} --to {conf['version']} --env {env}")
+    return notes
+
+
+def retired_notes(app_dir: Path, stale: list[Path]) -> list[str]:
+    """Notes for the streams and consumers whose files a render removes (read before they are deleted)."""
+    notes: list[tuple[str, str]] = []
+    for st in stale:
+        for f in sorted(st.rglob("*.yaml")) if st.is_dir() else [st]:
+            rel = f.relative_to(app_dir).parts
+            if len(rel) != 4 or rel[0] != "addons" or not (rel[3].startswith("stream-") or rel[3].startswith("consumer-")) or not f.is_file():
+                continue
+            try:
+                doc = yaml.safe_load(f.read_text())
+                kind, spec = doc["kind"], doc["spec"]
+                where = f"applications/{app_dir.name}/addons/{rel[1]}/{rel[2]}"
+                if kind == "Stream":
+                    text = f"note: {where}: stream {spec['name']} is no longer declared; it and its messages stay on the broker until you delete them"
+                elif kind == "Consumer":
+                    text = (f"note: {where}: durable consumer {spec['durableName']} of stream {spec['streamName']} is no longer declared; "
+                            "it stays on the broker until you delete it")
+                else:
+                    continue
+            except (yaml.YAMLError, KeyError, TypeError):
+                continue
+            notes.append((str(f), text))
+    return [t for _, t in sorted(notes)]
 
 
 def stale_paths(app_dir: Path, wanted: set[Path]) -> list[Path]:
     """Overlay component dirs for components/envs no longer declared, and generated files no longer produced."""
     stale: list[Path] = []
+    if (app_dir / "autonomy.json").is_file() and app_dir / "autonomy.json" not in wanted:
+        stale.append(app_dir / "autonomy.json")
     for env in ENVS:
         base = app_dir / "overlays" / env
         if not base.is_dir():
@@ -1769,7 +3453,8 @@ def stale_paths(app_dir: Path, wanted: set[Path]) -> list[Path]:
                     stale.append(d)
                     continue
                 # database files that are no longer rendered; restore-state.yaml is input and never touched
-                stale += [f for f in d.iterdir() if f not in wanted and (f.name in DATABASE_FILES or DATABASE_GENERATION.match(f.name))]
+                stale += [f for f in d.iterdir() if f not in wanted and (f.name in DATABASE_FILES or DATABASE_GENERATION.match(f.name)
+                                                                         or BROKER_STALE.match(f.name) or CREDENTIALS_STALE.match(f.name))]
     return stale
 
 
@@ -1780,7 +3465,53 @@ def unmigrated_dirs() -> list[Path]:
     return sorted(p for p in top.iterdir() if p.is_dir() and ((p / "app.yaml").is_file() or (p / "services.yaml").is_file()))
 
 
+def versions_table() -> list[dict]:
+    """The versions table (spec 121, ADR-069): one row per image, chart and manifest the renderer writes or the local cluster installs."""
+    def image_row(name, engine, major, status, ref_digest, part=None):
+        ref, digest = ref_digest.split("@", 1)
+        tag = ref.rsplit(":", 1)[1]
+        return {"name": name, "kind": "image", "engine": engine, "major": major, "status": status,
+                "version": tag.split("-")[0] if part else tag, "ref": ref, "digest": digest, "app_version": None, "crds": None}
+
+    def status_of(engine, major):
+        return "deprecated" if major in DEPRECATED_MAJORS.get(engine, ()) else "supported"
+
+    rows = [image_row(f"postgres {m}", "database", m, status_of("database", m), ref, True) for m, ref in POSTGRES_IMAGES.items()]
+    rows += [image_row(f"valkey {m}", "cache", m, status_of("cache", m), ref) for m, ref in VALKEY_IMAGES.items()]
+    rows += [image_row(f"nats {m}", "broker", m, status_of("broker", m), ref, True) for m, ref in NATS_IMAGES.items()]
+    rows.append({"name": "nats", "kind": "chart", "engine": "broker", "major": None, "status": None, "version": NATS_CHART["chart_version"],
+                 "ref": f"{NATS_CHART['repo_url']} {NATS_CHART['chart']}", "digest": None, "app_version": None, "crds": None})
+    rows += [image_row("seaweedfs", "bucket", None, None, SEAWEEDFS_IMAGE),
+             image_row("opentelemetry-collector", None, None, None, COLLECTOR_IMAGE),
+             image_row("lgtm", None, None, None, LGTM_IMAGE),
+             image_row("velero-plugin-for-aws", None, None, None, VELERO_AWS_PLUGIN_IMAGE),
+             image_row("credentials-job", None, None, None, CREDENTIALS_IMAGE)]
+
+    def manifest_row(name):
+        pin = CLUSTER_PINS[name]
+        return {"name": name, "kind": "manifest", "engine": None, "major": None, "status": None, "version": pin["version"],
+                "ref": pin["manifest"], "digest": None, "app_version": None, "crds": None}
+
+    rows.append(manifest_row("argo-cd"))
+    rows.append(image_row("k3s", None, None, None, CLUSTER_PINS["k3s"]["image"]))
+    rows.append(manifest_row("gateway-api"))
+    rows += [{"name": f"operator {n}", "kind": "chart", "engine": None, "major": None, "status": None, "version": op["chart_version"],
+              "ref": f"{op['repo_url']} {op['chart']}", "digest": None, "app_version": op["operator_version"], "crds": op["crds"]}
+             for n, op in OPERATORS.items()]
+    return rows
+
+
+def nothing_compared() -> str:
+    """The line of a --check that compared no rendered file (spec 130); the gate name comes from the recipe that runs the check."""
+    gate = os.environ.get("GATE_NAME") or "render-check"
+    return (f"{gate}: checked nothing: 0 files compared - "
+            "run `devbox run render` and check that applications/<system>/system.yaml exists")
+
+
 def main() -> int:
+    if "--versions" in sys.argv[1:]:
+        print(json.dumps(versions_table(), indent=2))
+        return 0
     check = "--check" in sys.argv[1:]
     old = unmigrated_dirs()
     if old:
@@ -1790,12 +3521,22 @@ def main() -> int:
     ans = answers()
     apps = sorted(p.parent for p in (ROOT / "applications").glob("*/system.yaml"))
     if not apps:
-        print("ERROR: no applications/*/system.yaml found", file=sys.stderr)
+        if check:
+            print(nothing_compared(), file=sys.stderr)
+        else:
+            print("ERROR: no applications/*/system.yaml found", file=sys.stderr)
         return 1
     drift: list[str] = []
+    retired: list[str] = []
     try:
         plans = [(app_dir, render_app(app_dir, ans)) for app_dir in apps]     # every system is validated before anything is written
         operators = operator_files(apps, ans)
+        unbound_notes: list[str] = []
+        external_notes: list[str] = []
+        for app_dir in apps:
+            u, x = render_notes(app_dir)
+            unbound_notes += u
+            external_notes += x + archive_notes(app_dir)
     except RenderError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
@@ -1806,7 +3547,9 @@ def main() -> int:
                 if not check:
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(content)
-        for st in stale_paths(app_dir, set(rendered)):
+        stale = stale_paths(app_dir, set(rendered))
+        retired += retired_notes(app_dir, stale)
+        for st in stale:
             drift.append(f"{st.relative_to(ROOT)} (stale)")
             if not check:
                 shutil.rmtree(st) if st.is_dir() else st.unlink()
@@ -1826,10 +3569,15 @@ def main() -> int:
             for d in sorted((p for p in op_dir.rglob("*") if p.is_dir()), reverse=True) + [op_dir]:
                 if not any(d.iterdir()):
                     d.rmdir()
+    for note in [*unbound_notes, *external_notes, *retired]:
+        print(note)
     if check and drift:
         print("ERROR: rendered files are out of date — run `devbox run render`:", file=sys.stderr)
         for d in drift:
             print(f"  {d}", file=sys.stderr)
+        return 1
+    if check and sum(len(rendered) for _, rendered in plans) + len(operators) == 0:
+        print(nothing_compared(), file=sys.stderr)
         return 1
     print("OK: up to date" if check else f"rendered ({len(drift)} file(s) changed)")
     return 0
