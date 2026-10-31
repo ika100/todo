@@ -61,6 +61,26 @@ spec:
             secretKeyRef:
               name: todo-postgres-app
               key: password
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: todo-cache-app
+              key: url
+        - name: REDIS_HOST
+          valueFrom:
+            secretKeyRef:
+              name: todo-cache-app
+              key: host
+        - name: REDIS_PORT
+          valueFrom:
+            secretKeyRef:
+              name: todo-cache-app
+              key: port
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: todo-cache-app
+              key: password
         resources:
           requests:
             cpu: 50m
