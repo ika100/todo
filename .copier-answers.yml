@@ -8,3 +8,5 @@ github_org: ika100
 owner: ika100
 platform_marketplace_ref: main
 project_name: todo
+property_operators: owner
+resource_metrics: provided
