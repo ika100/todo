@@ -40,6 +40,7 @@ components:
       - todo-api-rest
     uses:
       - postgres
+      - cache
     secretRefs: []
     replicas: 1
     resources:
