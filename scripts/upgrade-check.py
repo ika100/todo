@@ -6,15 +6,18 @@
 
   uv run scripts/upgrade-check.py --base origin/main
 
-For every applications/*/system.yaml present on both sides, loads the base file (through a temporary copy) and the working-tree file
+For every applications/*/system.yaml present on both sides, loads the base (the app directory at the base ref, extracted to a
+temporary directory with its external packages) and the working-tree file
 with render.load_system and compares each in-cluster resource instance's effective major per environment. A resource whose major changes
 in two or more environments fails. A base that does not render is ignored with a WARNING. Exit 0 = pass, 1 = fail.
 """
 from __future__ import annotations
 
 import argparse
+import io
 import subprocess
 import sys
+import tarfile
 import tempfile
 from pathlib import Path
 
@@ -27,6 +30,14 @@ import render  # noqa: E402
 def base_text(base: str, path: str) -> str | None:
     p = subprocess.run(["git", "show", f"{base}:{path}"], cwd=ROOT, capture_output=True, text=True)
     return p.stdout if p.returncode == 0 else None
+
+
+def base_tree(base: str, app: str, dest: Path) -> Path:
+    """Extract the app directory `app` (applications/<name>) at `base` into `dest`; external packages come along (#340)."""
+    p = subprocess.run(["git", "archive", "--format=tar", base, app], cwd=ROOT, capture_output=True, check=True)
+    with tarfile.open(fileobj=io.BytesIO(p.stdout)) as tar:
+        tar.extractall(dest, filter="data")
+    return dest / app
 
 
 def majors(system: dict) -> dict[str, dict[str, object]]:
@@ -58,12 +69,9 @@ def main(argv: list[str] | None = None) -> int:
             errors.append(str(e))
             continue
         with tempfile.TemporaryDirectory() as tmp:
-            copy = Path(tmp) / path.parent.name
-            copy.mkdir()
-            (copy / "system.yaml").write_text(text)
             try:
-                old = majors(render.load_system(copy))
-            except (render.RenderError, OSError) as e:
+                old = majors(render.load_system(base_tree(ns.base, path.parent.relative_to(ROOT).as_posix(), Path(tmp))))
+            except (render.RenderError, OSError, subprocess.CalledProcessError, tarfile.TarError) as e:
                 print(f"WARNING: {rel}: the base does not render, skipped ({str(e).splitlines()[0] if str(e) else e})")
                 continue
         for r, envs in new.items():

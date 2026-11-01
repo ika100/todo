@@ -504,8 +504,25 @@ def fail(text: str):
     raise RenderError(text)
 
 
+class Literal(str):
+    """Platform code embedded in a ConfigMap's `data` (the credentials Job's create.py): written as a YAML literal block whose
+    header line carries `# pragma: allowlist secret`. detect-secrets reports a whole YAML value at its key line, and the script's
+    alphabet and names look like secrets to it; no credential value is ever rendered (ADR-072)."""
+
+
+yaml.SafeDumper.add_representer(Literal, lambda d, s: d.represent_scalar("tag:yaml.org,2002:str", str(s), style="|"))
+
+
 def dump(doc: dict) -> str:
-    return yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
+    text = yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
+    data = doc.get("data") if isinstance(doc, dict) else None
+    for key, value in (data or {}).items():
+        if isinstance(value, Literal):
+            header = f"\n  {key}: |\n"
+            if header not in text:
+                fail(f"internal: the literal block of data.{key} was not written as `{key}: |`")
+            text = text.replace(header, f"\n  {key}: |  # pragma: allowlist secret\n", 1)
+    return text
 
 
 def answers() -> dict:
@@ -825,7 +842,8 @@ def validate_external(app_dir: Path, s: dict) -> None:
         for env in s["environments"]:
             pkg = app_dir / str(ext["kustomize"]).format(env=env)
             if not (pkg / "kustomization.yaml").is_file():
-                fail(f"components.{n}: {pkg.relative_to(ROOT)}/kustomization.yaml does not exist")
+                shown = pkg.relative_to(ROOT) if pkg.is_relative_to(ROOT) else pkg.relative_to(app_dir)
+                fail(f"components.{n}: {shown}/kustomization.yaml does not exist")
     else:
         helm = ext["helm"] or {}
         for k in ("repoURL", "path"):
@@ -2728,7 +2746,7 @@ def credentials_files(app: str, env: str, owner: str, labels: dict, plan: dict) 
             "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": name},
             "subjects": [{"kind": "ServiceAccount", "name": name, "namespace": ns}]},
         "credentials-configmap.yaml": {"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta(name, "0", "BeforeHookCreation"),
-                                       "data": {"create.py": CREDENTIALS_SCRIPT, "plan.json": plan_text}},
+                                       "data": {"create.py": Literal(CREDENTIALS_SCRIPT), "plan.json": plan_text}},
         "credentials-job.yaml": {
             "apiVersion": "batch/v1", "kind": "Job",
             "metadata": meta(f"{owner[:42].rstrip('-')}-credentials-{digest}", "1", "BeforeHookCreation,HookSucceeded"),
