@@ -1,4 +1,4 @@
 # Written by /component:new and /platform:update; read by /platform:doctor.
-platform: 5.5.0
+platform: 5.6.0
 shape: gitops-app
 ref: v4.8.0
